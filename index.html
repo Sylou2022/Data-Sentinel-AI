@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Vue d'ensemble</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400&display=swap">
+  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="icon" type="image/png" href="/assets/logo.png">
+</head>
+<body>
+  <div class="app" id="app">
+    <nav aria-label="Navigation principale" class="sidebar">
+      <div class="logo"><img src="/assets/logo.png" alt="DataSentinel AI" width="216" height="216"></div>
+      <a class="nav" href="#/vue-ensemble" data-page="overview">Vue d'ensemble</a>
+      <a class="nav" href="#/import" data-page="import">Importer des données</a>
+      <a class="nav" href="#/enquete" data-page="investigation">Enquêtes</a>
+      <a class="nav" href="#/rapport" data-page="report">Rapports et exports</a>
+      <a class="nav" href="#/journal" data-page="audit">Journal d'audit</a>
+      <a class="nav" href="#/parametres" data-page="settings">Paramètres</a>
+      <div class="readonly">
+        <div class="readonly-title">Mode lecture seule</div>
+        Aucune modification n'est envoyée aux systèmes de production.
+      </div>
+    </nav>
+    <main id="main"></main>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <dialog id="dialog" aria-labelledby="dialog-title"></dialog>
+  <script src="/static/app.js"></script>
+</body>
+</html>
