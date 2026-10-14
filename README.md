@@ -1,10 +1,3 @@
----
-title: DataSentinel AI
-sdk: docker
-app_port: 7860
----
-
-
 
 # Data-Sentinel-AI
 
