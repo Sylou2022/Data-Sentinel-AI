@@ -1,0 +1,16 @@
+# Depuis un conteneur Linux, l'authentification Windows n'est pas disponible :
+# utiliser un compte SQL (SQLSERVER_TRUSTED_CONNECTION=no + SQLSERVER_USER/PASSWORD) et activer TCP/IP sur l'instance.
+x-common: &common
+  build: .
+  volumes: ["sentinel-data:/data"]
+  env_file: [{path: .env, required: false}]
+  environment:
+    SQLSERVER_SERVER: ${SQLSERVER_SERVER_DOCKER:-host.docker.internal,1433}
+  extra_hosts: ["host.docker.internal:host-gateway"]
+
+services:
+  app:  # interface web (http://localhost:8000) et API REST
+    <<: *common
+    ports: ["8000:8000"]
+volumes:
+  sentinel-data:
