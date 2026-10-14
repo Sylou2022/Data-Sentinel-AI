@@ -1,3 +1,11 @@
+---
+title: DataSentinel AI
+sdk: docker
+app_port: 7860
+---
+
+
+
 # Data-Sentinel-AI
 
 De l'anomalie à la résolution : détecter, enquêter, expliquer, proposer, vérifier — en lecture seule.
