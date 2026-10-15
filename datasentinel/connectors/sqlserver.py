@@ -14,6 +14,9 @@ from __future__ import annotations
 import struct
 from azure.identity import ClientSecretCredential
 
+import socket
+
+
 import hashlib
 import json
 import re
@@ -86,6 +89,16 @@ class SqlServerSource:
     def __init__(self, settings: SqlServerSettings):
         self.settings = settings
 
+    
+    def test_network(self):
+        server = self.settings.server
+        try:
+            with socket.create_connection((server, 1433), timeout=10):
+                return f"Connexion réseau OK vers {server}:1433"
+        except Exception as e:
+            return f"Échec réseau vers {server}:1433 — {type(e).__name__}: {e}"
+
+
 
     def _connect(self):
         import pyodbc
@@ -126,30 +139,101 @@ class SqlServerSource:
         finally:
             cur.close()
 
+    # def test_connection(self) -> dict:
+    #     con = self._connect()
+    #     try:
+    #         info = self._read(con, "SELECT @@SERVERNAME AS server_name, DB_NAME() AS database_name, "
+    #                                "SYSTEM_USER AS login_name, CAST(SERVERPROPERTY('ProductVersion') AS varchar(30)) AS version")
+    #         perms = self._read(con, "SELECT permission_name FROM fn_my_permissions(NULL, 'DATABASE')")
+    #         tables = self._read(con, """
+    #             SELECT s.name AS schema_name, t.name AS table_name,
+    #                    SUM(CASE WHEN p.index_id IN (0, 1) THEN p.rows ELSE 0 END) AS row_count
+    #             FROM sys.tables t JOIN sys.schemas s ON s.schema_id = t.schema_id
+    #             JOIN sys.partitions p ON p.object_id = t.object_id
+    #             WHERE t.is_ms_shipped = 0 GROUP BY s.name, t.name""")
+    #     finally:
+    #         con.rollback()
+    #         con.close()
+    #     granted = set(perms["permission_name"])
+    #     write_perms = sorted(granted & {"INSERT", "UPDATE", "DELETE", "ALTER", "CONTROL", "CREATE TABLE"})
+    #     return {
+    #         **{k: str(v) for k, v in info.iloc[0].items()},
+    #         "tables": tables.sort_values(["schema_name", "table_name"]).to_dict(orient="records"),
+    #         "write_permissions": write_perms,
+    #         "warning": ("Ce compte dispose de droits d'écriture (" + ", ".join(write_perms) + "). DataSentinel n'exécute "
+    #                     "que des SELECT, mais un compte limité à db_datareader est recommandé.") if write_perms else None,
+    #     }
+    
     def test_connection(self) -> dict:
-        con = self._connect()
+        import socket
+
         try:
-            info = self._read(con, "SELECT @@SERVERNAME AS server_name, DB_NAME() AS database_name, "
-                                   "SYSTEM_USER AS login_name, CAST(SERVERPROPERTY('ProductVersion') AS varchar(30)) AS version")
-            perms = self._read(con, "SELECT permission_name FROM fn_my_permissions(NULL, 'DATABASE')")
+            with socket.create_connection(
+                (self.settings.server, 1433), timeout=10
+            ):
+                pass
+        except Exception as exc:
+            return {
+                "ok": False,
+                "stage": "network",
+                "server": self.settings.server,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+
+        try:
+            con = self._connect()
+        except Exception as exc:
+            return {
+                "ok": False,
+                "stage": "authentication",
+                "network": "OK",
+                "server": self.settings.server,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+
+        try:
+            info = self._read(
+                con,
+                "SELECT @@SERVERNAME AS server_name, "
+                "DB_NAME() AS database_name, SYSTEM_USER AS login_name, "
+                "CAST(SERVERPROPERTY('ProductVersion') AS varchar(30)) AS version"
+            )
+            perms = self._read(
+                con,
+                "SELECT permission_name FROM fn_my_permissions(NULL, 'DATABASE')"
+            )
             tables = self._read(con, """
                 SELECT s.name AS schema_name, t.name AS table_name,
-                       SUM(CASE WHEN p.index_id IN (0, 1) THEN p.rows ELSE 0 END) AS row_count
-                FROM sys.tables t JOIN sys.schemas s ON s.schema_id = t.schema_id
+                    SUM(CASE WHEN p.index_id IN (0, 1) THEN p.rows ELSE 0 END) AS row_count
+                FROM sys.tables t
+                JOIN sys.schemas s ON s.schema_id = t.schema_id
                 JOIN sys.partitions p ON p.object_id = t.object_id
-                WHERE t.is_ms_shipped = 0 GROUP BY s.name, t.name""")
+                WHERE t.is_ms_shipped = 0
+                GROUP BY s.name, t.name
+            """)
         finally:
             con.rollback()
             con.close()
+
         granted = set(perms["permission_name"])
-        write_perms = sorted(granted & {"INSERT", "UPDATE", "DELETE", "ALTER", "CONTROL", "CREATE TABLE"})
+        write_perms = sorted(
+            granted & {"INSERT", "UPDATE", "DELETE", "ALTER", "CONTROL", "CREATE TABLE"}
+        )
+
         return {
+            "ok": True,
             **{k: str(v) for k, v in info.iloc[0].items()},
-            "tables": tables.sort_values(["schema_name", "table_name"]).to_dict(orient="records"),
+            "tables": tables.sort_values(
+                ["schema_name", "table_name"]
+            ).to_dict(orient="records"),
             "write_permissions": write_perms,
-            "warning": ("Ce compte dispose de droits d'écriture (" + ", ".join(write_perms) + "). DataSentinel n'exécute "
-                        "que des SELECT, mais un compte limité à db_datareader est recommandé.") if write_perms else None,
+            "warning": (
+                "Ce compte dispose de droits d'écriture ("
+                + ", ".join(write_perms)
+                + "). Un compte limité à db_datareader est recommandé."
+            ) if write_perms else None,
         }
+
 
     def extract(self, out_root: Path, mapping: dict[str, str] | None = None) -> Path:
         """Extrait les tables canoniques vers un instantané DuckDB et retourne son chemin."""
