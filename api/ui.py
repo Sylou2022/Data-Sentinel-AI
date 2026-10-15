@@ -800,7 +800,22 @@ def sqlserver_test(svc: DataSentinel = Depends(get_service)):
         info = svc.sqlserver_test()
     except Exception as exc:
         raise HTTPException(502, f"Connexion impossible : {type(exc).__name__} — {exc}")
-    return {k: info[k] for k in ("server_name", "database_name", "login_name", "version", "warning")}
+    
+    if not info.get("ok", True):
+        return info
+
+    return {
+        k: info[k]
+        for k in (
+            "server_name",
+            "database_name",
+            "login_name",
+            "version",
+            "warning",
+        )
+        if k in info
+    }
+
 
 
 @router.post("/sources/sqlserver/extract")
