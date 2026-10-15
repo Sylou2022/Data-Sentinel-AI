@@ -11,6 +11,9 @@ fichier JSON {"table_canonique": "SELECT ..."} via SQLSERVER_MAPPING_FILE.
 """
 from __future__ import annotations
 
+import struct
+from azure.identity import ClientSecretCredential
+
 import hashlib
 import json
 import re
@@ -83,10 +86,33 @@ class SqlServerSource:
     def __init__(self, settings: SqlServerSettings):
         self.settings = settings
 
-    def _connect(self):
-        import pyodbc  # dépendance optionnelle
 
-        con = pyodbc.connect(self.settings.connection_string(), autocommit=False, timeout=10)
+    def _connect(self):
+        import pyodbc
+
+        credential = ClientSecretCredential(
+            tenant_id=self.settings.tenant_id,
+            client_id=self.settings.client_id,
+            client_secret=self.settings.client_secret,
+        )
+
+        token = credential.get_token(
+            "https://database.windows.net/.default"
+        ).token
+
+        token_bytes = token.encode("utf-16-le")
+        token_struct = struct.pack(
+            f"<I{len(token_bytes)}s",
+            len(token_bytes),
+            token_bytes,
+        )
+
+        con = pyodbc.connect(
+            self.settings.connection_string(),
+            attrs_before={1256: token_struct},
+            autocommit=False,
+            timeout=10,
+        )
         con.timeout = 300
         return con
 

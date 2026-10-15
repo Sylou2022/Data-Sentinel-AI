@@ -16,27 +16,34 @@ def _env(name: str, default: str = "") -> str:
     return os.getenv(name, default)
 
 
+
 @dataclass(frozen=True)
 class SqlServerSettings:
     server: str = field(default_factory=lambda: _env("SQLSERVER_SERVER", r"localhost\SQLEXPRESS"))
     database: str = field(default_factory=lambda: _env("SQLSERVER_DATABASE", "Data_Sentinel_AI"))
     driver: str = field(default_factory=lambda: _env("SQLSERVER_DRIVER", "ODBC Driver 18 for SQL Server"))
-    # Authentification Windows par défaut ; sinon utilisateur SQL (idéalement membre de db_datareader uniquement).
+
+    tenant_id: str = field(default_factory=lambda: _env("SQLSERVER_TENANT_ID"))
+    client_id: str = field(default_factory=lambda: _env("SQLSERVER_CLIENT_ID"))
+    client_secret: str = field(default_factory=lambda: _env("SQLSERVER_CLIENT_SECRET"), repr=False)
+
     trusted_connection: bool = field(default_factory=lambda: _env("SQLSERVER_TRUSTED_CONNECTION", "yes").lower() in ("yes", "true", "1"))
     user: str = field(default_factory=lambda: _env("SQLSERVER_USER"))
     password: str = field(default_factory=lambda: _env("SQLSERVER_PASSWORD"), repr=False)
-    trust_server_certificate: bool = field(default_factory=lambda: _env("SQLSERVER_TRUST_SERVER_CERTIFICATE", "yes").lower() in ("yes", "true", "1"))
+    trust_server_certificate: bool = field(default_factory=lambda: _env("SQLSERVER_TRUST_SERVER_CERTIFICATE", "no").lower() in ("yes", "true", "1"))
     mapping_file: str = field(default_factory=lambda: _env("SQLSERVER_MAPPING_FILE"))
 
     def connection_string(self) -> str:
-        parts = [f"DRIVER={{{self.driver}}}", f"SERVER={self.server}", f"DATABASE={self.database}",
-                 "ApplicationIntent=ReadOnly", "Encrypt=yes",
-                 f"TrustServerCertificate={'yes' if self.trust_server_certificate else 'no'}"]
-        if self.trusted_connection:
-            parts.append("Trusted_Connection=yes")
-        else:
-            parts += [f"UID={self.user}", f"PWD={self.password}"]
+        parts = [
+            f"DRIVER={{{self.driver}}}",
+            f"SERVER={self.server}",
+            f"DATABASE={self.database}",
+            "ApplicationIntent=ReadOnly",
+            "Encrypt=yes",
+            f"TrustServerCertificate={'yes' if self.trust_server_certificate else 'no'}",
+        ]
         return ";".join(parts) + ";"
+
 
 
 @dataclass(frozen=True)
