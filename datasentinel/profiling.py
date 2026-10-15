@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import pandas as pd
 
+from .ingestion import LINE_COL
+
 
 def profile_dataframe(df: pd.DataFrame, name: str = "table", key: str | None = None) -> dict:
+    df = df.drop(columns=[LINE_COL], errors="ignore")  # numéro de ligne source : technique, non profilé
     columns = []
     for col in df.columns:
         s = df[col]

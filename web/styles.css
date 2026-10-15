@@ -220,9 +220,6 @@ dialog p { margin: 0; font-size: 14px; color: var(--muted); line-height: 1.5; }
 }
 .toast.show { opacity: 1; transform: none; }
 .toast.error { background: #8A1C14; }
-.swatches { display: flex; flex-wrap: wrap; gap: 12px; }
-.swatches label { display: flex; align-items: center; gap: 8px; min-height: 44px; cursor: pointer; font-size: 14px; }
-.swatch { width: 24px; height: 24px; border-radius: 6px; display: inline-block; }
 
 @media (max-width: 1100px) {
   .kpis, .agents, .checks { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -239,3 +236,100 @@ dialog p { margin: 0; font-size: 14px; color: var(--muted); line-height: 1.5; }
 .fact-row .btn { flex: 0 0 auto; }
 .notice { font-size: 14px; line-height: 1.5; border-left: 4px solid #B4470F; }
 .notice.error { border-left-color: #B3261E; color: #8A1C14; }
+
+/* ---------- cartes indicateurs colorées */
+.kpi { position: relative; overflow: hidden; border-top: 4px solid var(--tone); background: linear-gradient(180deg, var(--tone-bg) 0%, #FFFFFF 85%); }
+.kpi-top { display: flex; align-items: center; gap: 10px; }
+.kpi-icon { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: 8px;
+  background: var(--tone); color: #FFFFFF; font-size: 15px; font-weight: 600; }
+.kpi .kpi-label { color: var(--tone-ink); font-weight: 600; }
+.kpi .kpi-value { color: var(--tone-ink); }
+.tone-red    { --tone: #C62828; --tone-bg: #FDECEA; --tone-ink: #8A1C14; }
+.tone-orange { --tone: #E07B00; --tone-bg: #FFF1DE; --tone-ink: #7A3E00; }
+.tone-green  { --tone: #2E8B57; --tone-bg: #E3F4EA; --tone-ink: #165A2E; }
+.tone-blue   { --tone: #2A78D6; --tone-bg: #E3EEFB; --tone-ink: #124A85; }
+.tone-teal   { --tone: #0B6E7A; --tone-bg: #DFF1F2; --tone-ink: #08515A; }
+
+/* ---------- carte « Anomalies détectées » */
+.anomalies-card, .audit-card { border: 2px solid var(--nav-bg); box-shadow: 0 6px 18px rgba(15, 27, 45, .10); }
+.card-head.band { background: var(--nav-bg); color: #FFFFFF; border-bottom: 0; }
+.card-head.band h2 { display: flex; align-items: center; gap: 10px; font-size: 19px; }
+.band-count { display: inline-flex; align-items: center; justify-content: center; min-width: 30px; height: 30px; padding: 0 8px;
+  border-radius: 999px; background: #C62828; color: #FFFFFF; font-size: 15px; }
+.card-head.band .pill { background: transparent; color: #FFFFFF; border-color: #5A6F8A; }
+.card-head.band .pill[aria-pressed="true"] { background: #FFFFFF; color: var(--nav-bg); border-color: #FFFFFF; }
+.anomalies tbody tr td:first-child { border-left: 5px solid transparent; }
+.anomalies tr.sev-critical td:first-child { border-left-color: #C62828; }
+.anomalies tr.sev-high td:first-child { border-left-color: #E07B00; }
+.anomalies tr.sev-medium td:first-child { border-left-color: #E8B400; }
+.anomalies tr.sev-low td:first-child { border-left-color: #8FA3B8; }
+.anomalies tbody tr:hover, table.audit tbody tr:hover { background: #F7F9FB; }
+
+/* ---------- journal d'audit */
+table.audit tbody tr:nth-child(even) { background: #FAFBFD; }
+
+/* ---------- graphique du chiffre d'affaires */
+.rev-chart { margin: 4px 0 14px 0; }
+.chart-box { position: relative; }
+.rev-chart .chart { max-height: none; }
+.rev-chart .grid { stroke: #E6EBF1; stroke-width: 1; }
+.rev-chart .axis { fill: var(--muted); font: 12px var(--sans); }
+.rev-chart .window { fill: #F3F7FC; }
+.rev-chart .line-obs { fill: none; stroke: #2A78D6; stroke-width: 2.5; stroke-linejoin: round; stroke-linecap: round; }
+.rev-chart .line-exp { fill: none; stroke: #8A96A6; stroke-width: 2; stroke-dasharray: 6 5; stroke-linejoin: round; }
+.rev-chart circle.flag-drop { fill: #C62828; stroke: #FFFFFF; stroke-width: 2; }
+.rev-chart circle.flag-spike { fill: #E07B00; stroke: #FFFFFF; stroke-width: 2; }
+.rev-chart .lbl { fill: var(--ink); font: 600 12px var(--sans); }
+.rev-chart .lbl-muted { fill: var(--muted); }
+.rev-chart .cross { stroke: #14202E; stroke-width: 1; opacity: .35; }
+.rev-chart .hit { fill: transparent; cursor: crosshair; }
+.chart-tip { position: absolute; top: 16px; background: var(--nav-bg); color: #FFFFFF; padding: 8px 10px; border-radius: 8px;
+  font-size: 13px; line-height: 1.45; pointer-events: none; min-width: 170px; box-shadow: 0 4px 12px rgba(0,0,0,.18); }
+.chart-legend { align-items: center; margin: 0 0 6px 0; }
+.chart-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.key { display: inline-block; width: 20px; height: 0; border-top: 3px solid #2A78D6; }
+.key-exp { border-top: 2px dashed #8A96A6; }
+.dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
+.dot.flag-drop { background: #C62828; }
+.dot.flag-spike { background: #E07B00; }
+.chart-table { margin-top: 8px; font-size: 13px; color: var(--muted); }
+.chart-table summary { cursor: pointer; }
+
+/* ---------- rapport : correction */
+.sub-h { font-size: 15px; font-weight: 600; margin: 18px 0 6px 0; }
+
+/* ---------- constats de qualité */
+.reco { margin-top: 6px; font-size: 13px; line-height: 1.45; color: var(--ink); background: #F1F7EE; border-left: 3px solid #2E8B57;
+  padding: 6px 10px; border-radius: 0 6px 6px 0; }
+.reco strong { color: #165A2E; }
+.badges { display: flex; gap: 8px; flex-wrap: wrap; }
+dl.diag { display: grid; grid-template-columns: 150px 1fr; gap: 8px 16px; margin: 14px 0 0 0; font-size: 14px; line-height: 1.5; }
+dl.diag dt { color: var(--muted); font-weight: 500; }
+dl.diag dd { margin: 0; }
+.reco-card { border: 2px solid #2E8B57; background: linear-gradient(180deg, #E3F4EA 0%, #FFFFFF 60%); }
+.hist { max-height: 220px; }
+.hist .bar { fill: #2A78D6; }
+.hist .grid { stroke: #B9C4D0; }
+.hist .axis { fill: var(--muted); font: 12px var(--sans); }
+.hist .median { stroke: #14202E; stroke-dasharray: 4 4; opacity: .6; }
+.hist .flag-line { stroke: #C62828; stroke-width: 2; }
+.hist .flag-dot { fill: #C62828; stroke: #FFFFFF; stroke-width: 2; }
+.rev-chart .chart { max-height: 260px; }
+.side-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.anomalies td .reco { max-width: 760px; }
+@media (max-width: 900px) { .side-row { grid-template-columns: minmax(0, 1fr); } }
+
+/* ---------- tableau des anomalies compact */
+.table-scroll { max-height: 560px; overflow-y: auto; }
+.table-scroll thead th { position: sticky; top: 0; z-index: 1; }
+.anomalies { font-size: 13px; }
+.anomalies th, .anomalies th:first-child, .anomalies th:last-child { padding: 9px 8px; }
+.anomalies td { padding: 8px 8px; }
+.anomalies td:first-child { padding: 8px 12px; }
+.anomalies td:last-child { padding: 6px 12px; }
+.anomalies .title { font-size: 14px; }
+.anomalies .sub { font-size: 12px; }
+.anomalies .badge { font-size: 12px; padding: 3px 8px; }
+.anomalies .btn-compact { min-height: 34px; font-size: 13px; padding: 0 12px; }
+.anomalies td .reco { max-width: 520px; font-size: 12px; padding: 4px 8px; margin-top: 4px;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }

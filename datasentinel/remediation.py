@@ -136,6 +136,60 @@ def validate_sandbox_sql(sql: str) -> None:
         raise PermissionError("Instruction interdite dans le bac à sable (accès fichiers/extensions).")
 
 
+_TARGET = re.compile(r'\b(?:create\s+or\s+replace\s+table|update|delete\s+from|insert\s+into)\s+"?(\w+)"?', re.IGNORECASE)
+
+
+def _key_column(columns: list[str]) -> str | None:
+    """Colonne identifiant la ligne : numéro de ligne du fichier source, sinon identifiant métier."""
+    for c in ("_ligne_source", "id", "sku"):
+        if c in columns:
+            return c
+    return next((c for c in columns if c.lower().endswith("_id") and c != "run_id"), None)
+
+
+def plan_changes(wh: Warehouse, sql: str, limit: int = 20) -> list[dict]:
+    """Exécute la correction sur une copie et compare chaque table modifiée à la source.
+
+    Pour chaque identifiant : valeur actuelle -> valeur proposée (modification), ligne retirée ou ajoutée.
+    Rien n'est déduit : c'est la différence exacte entre la copie corrigée et la source."""
+    validate_sandbox_sql(sql)
+    tables = list(dict.fromkeys(m.group(1) for m in _TARGET.finditer(sql)))
+    sb = wh.sandbox()
+    try:
+        for stmt in [x.strip() for x in sql.split(";") if x.strip()]:
+            sb.execute(stmt)
+        out = []
+        for t in tables:
+            if not wh.has_table(t):
+                continue
+            src = wh.con.execute(f'SELECT * FROM "{t}"').df()
+            sb.con.register("_src", src)
+            removed = sb.con.execute(f'SELECT * FROM _src EXCEPT ALL SELECT * FROM "{t}"').df()
+            added = sb.con.execute(f'SELECT * FROM "{t}" EXCEPT ALL SELECT * FROM _src').df()
+            sb.con.unregister("_src")
+            key = _key_column(list(src.columns))
+            changes = []
+            if key:
+                new_by_key: dict = {}  # un identifiant peut apparaître plusieurs fois (doublons)
+                for k, r in zip(added[key], records(added, len(added))):
+                    new_by_key.setdefault(k, []).append(r)
+                for k, old in zip(removed[key], records(removed, len(removed))):
+                    new = new_by_key[k].pop(0) if new_by_key.get(k) else None
+                    if new is None:
+                        changes.append({"key": old[key], "action": "supprimée", "row": old})
+                    else:
+                        diff = {c: {"actuelle": old[c], "proposée": new[c]} for c in old if old[c] != new[c]}
+                        changes.append({"key": old[key], "action": "modifiée", "changes": diff})
+                changes += [{"key": r[key], "action": "ajoutée", "row": r} for rows in new_by_key.values() for r in rows]
+            else:
+                changes = [{"key": None, "action": "supprimée", "row": r} for r in records(removed, limit)] +                           [{"key": None, "action": "ajoutée", "row": r} for r in records(added, limit)]
+            out.append({"table": t, "key": key, "total": len(changes) if key else int(len(removed) + len(added)),
+                        "removed": int(len(removed)), "added": int(len(added)), "changes": changes[:limit]})
+        return out
+    finally:
+        sb.close()
+
+
 class Verifier:
     """Teste chaque correction sur une copie isolée et classe les causes."""
 
@@ -215,7 +269,7 @@ class Verifier:
                 if plan.get("executable_in_sandbox") and plan.get("sql") and plan.get("decision") != "rejected":
                     self._apply(sb, plan)
                     applied.append(plan["id"])
-            det = run_detection(sb, self.ctx.settings, self.ctx.as_of)
+            det = run_detection(sb, self.ctx.settings, self.ctx.as_of, quality=False)
         finally:
             sb.close()
         return {"applied_plans": applied, "residual_anomalies": [

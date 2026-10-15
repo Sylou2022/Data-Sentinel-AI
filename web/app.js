@@ -3,14 +3,7 @@
 "use strict";
 
 const API = "/ui/api";
-const CHECKS = [["volume", "Volume"], ["freshness", "Fraîcheur"], ["amounts", "Montants"], ["categories", "Catégories"]];
-const ACCENTS = [["#0B6E7A", "#08515A", "Bleu canard"], ["#2B5BD7", "#1F45A8", "Bleu"],
-                 ["#5B3FD1", "#4530A3", "Violet"], ["#B4470F", "#8A360B", "Orange brûlé"]];
-const SCENARIOS = {
-  all: "Les 5 incidents combinés", baseline: "Aucun incident (contrôle des fausses alertes)",
-  partial_load: "Chargement incomplet des commandes", duplicate_orders: "Doublons de commandes",
-  price_error: "Prix produit incohérent", late_load: "Chargements retardés", missing_categories: "Catégories manquantes",
-};
+const CHECKS = [["quality", "Qualité des données"], ["volume", "Volume"], ["freshness", "Fraîcheur"], ["amounts", "Montants"], ["categories", "Catégories"]];
 const PAGES = {
   "vue-ensemble": { key: "overview", title: "Vue d'ensemble", tall: false },
   "import": { key: "import", title: "Import et profilage", tall: false },
@@ -24,7 +17,7 @@ const LEVELS = { observed: ["Observée", "b-observed"], hypothesis: ["Hypothèse
                  confirmed: ["Confirmée", "b-confirmed"] };
 const AGENT_BADGES = { done: ["Terminé", "b-done"], running: ["En cours", "b-running"], pending: ["En attente", "b-neutral"],
                        skipped: ["Non requis", "b-neutral"], error: ["Échec", "b-critical"] };
-const ALERT_CLASS = { "Doublons possibles": "b-high", "Distribution à contrôler": "b-medium", "Aucune": "b-neutral" };
+const ALERT_CLASS = { "Doublons possibles": "b-high", "Valeurs non conformes": "b-high", "Distribution à contrôler": "b-medium", "Aucune": "b-neutral" };
 
 // ------------------------------------------------------------------ état local
 const backend = area => ({
@@ -32,19 +25,23 @@ const backend = area => ({
   set(k, v) { area.setItem("ds." + k, JSON.stringify(v)); },
 });
 const store = backend(localStorage);
-// La source choisie (fichiers CSV, Meridian Retail) ne vaut que pour la session : sans choix,
+// La source choisie (fichiers CSV, instantané SQL Server) ne vaut que pour la session : sans choix,
 // la Vue d'ensemble revient à l'analyse de la base SQL Server reliée.
 const session = backend(sessionStorage);
 const S = {
   useDefault: session.get("useDefault", true),
   dbPath: session.get("dbPath", null), runId: session.get("runId", null), actor: store.get("actor", "analyste"),
-  checks: store.get("checks", CHECKS.map(c => c[0])), sep: store.get("sep", "auto"), accent: store.get("accent", ACCENTS[0][0]),
-  scenario: store.get("scenario", "all"),
+  checks: store.get("checks", CHECKS.map(c => c[0])), sep: store.get("sep", "auto"),
   data: null, filter: "Toutes", profile: null, profileTable: null, expanded: false, openResults: {}, testResult: {},
-  audit: null, auditQueries: false, auditAll: false, settings: null, evaluation: null, poll: null, busy: false,
+  audit: null, auditQueries: false, auditAll: false, settings: null, poll: null, busy: false,
 };
+// Préférences enregistrées avant l'ajout des contrôles de qualité : on les active une fois.
+if (!store.get("checks_v2", false)) {
+  if (!S.checks.includes("quality")) S.checks.unshift("quality");
+  store.set("checks_v2", true);
+}
 function save() {
-  ["actor", "checks", "sep", "accent", "scenario"].forEach(k => store.set(k, S[k]));
+  ["actor", "checks", "sep"].forEach(k => store.set(k, S[k]));
   session.set("useDefault", S.useDefault);
   session.set("dbPath", S.useDefault ? null : S.dbPath);
   session.set("runId", S.useDefault ? null : S.runId);
@@ -72,12 +69,6 @@ async function api(path, opts = {}) {
   const body = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(typeof body.detail === "string" ? body.detail : "Erreur " + r.status);
   return body;
-}
-
-function applyAccent() {
-  const a = ACCENTS.find(x => x[0] === S.accent) || ACCENTS[0];
-  document.documentElement.style.setProperty("--accent", a[0]);
-  document.documentElement.style.setProperty("--accent-hover", a[1]);
 }
 
 function route() {
@@ -146,9 +137,12 @@ function viewOverview() {
      <a class="btn btn-secondary" href="#/import">Importer un CSV</a>
      <button type="button" class="btn btn-primary" data-action="analyse" ${d.running ? "disabled" : ""}>
        ${d.running ? "Analyse en cours…" : "Lancer une analyse"}</button>`);
-  const kpis = `<section class="kpis" aria-label="Indicateurs">${d.kpis.map(k => `
-    <div class="card kpi"><div class="kpi-label">${esc(k.label)}</div><div class="kpi-value">${esc(k.value)}</div>
-    <div class="kpi-sub">${esc(k.sub)}</div></div>`).join("")}</section>`;
+  const kpis = `<section class="kpis" aria-label="Indicateurs">${d.kpis.map(k => {
+    const [tone, icon] = kpiTone(k);
+    return `<div class="card kpi tone-${tone}"><div class="kpi-top"><span class="kpi-icon" aria-hidden="true">${icon}</span>
+      <span class="kpi-label">${esc(k.label)}</span></div><div class="kpi-value">${esc(k.value)}</div>
+      <div class="kpi-sub">${esc(k.sub)}</div></div>`;
+  }).join("")}</section>`;
 
   const keep = i => ({ "Critiques": i.severity === "critical", "En cours": !i.resolved, "Résolues": i.resolved }[S.filter] ?? true);
   const rows = d.incidents.filter(keep);
@@ -163,18 +157,24 @@ function viewOverview() {
     const confirmed = i.level === "confirmed";
     const href = confirmed ? `#/rapport?i=${encodeURIComponent(i.id)}` : `#/enquete?i=${encodeURIComponent(i.id)}`;
     const cls = n === 0 ? "btn btn-primary" : "btn btn-outline";
-    return `<tr><td>${badge(i.severity_label, SEVERITY_CLASS[i.severity])}</td>
-      <td><div class="title">${esc(i.title)}</div><div class="sub">${esc(i.subtitle)}</div></td>
+    if (i.is_quality) return `<tr class="sev-${i.severity}"><td>${badge(i.severity_label, SEVERITY_CLASS[i.severity])}</td>
+      <td><div class="title">${esc(i.title)}</div><div class="sub">${esc(i.subtitle)}</div>
+        <div class="reco" title="${esc(i.recommendation)}"><strong>Recommandation :</strong> ${esc(i.recommendation)}</div></td>
+      <td class="mono">${esc(i.table)}</td><td>${badge(i.status_label, i.status_label === "Erreur confirmée" ? "b-critical" : "b-hypothesis")}</td>
+      <td><a class="${cls} btn-compact" href="#/enquete?i=${encodeURIComponent(i.id)}">Détail</a></td></tr>`;
+    return `<tr class="sev-${i.severity}"><td>${badge(i.severity_label, SEVERITY_CLASS[i.severity])}</td>
+      <td><div class="title">${esc(i.title)}</div><div class="sub">${esc(i.subtitle)}</div>
+        <div class="reco" title="${esc(i.recommendation)}"><strong>Recommandation :</strong> ${esc(i.recommendation)}</div></td>
       <td class="mono">${esc(i.table)}</td><td>${badge(lvl, lcls)}</td>
-      <td><a class="${cls}" href="${href}">${confirmed ? "Voir le rapport" : "Enquêter"}</a></td></tr>`;
+      <td><a class="${cls} btn-compact" href="${href}">${confirmed ? "Rapport" : "Enquêter"}</a></td></tr>`;
   }).join("");
-  const table = `<section class="col-main card clip" aria-label="Anomalies détectées">
-    <div class="card-head"><h2>Anomalies détectées</h2>
+  const table = `<section class="card clip anomalies-card" aria-label="Anomalies détectées">
+    <div class="card-head band"><h2><span class="band-count">${d.incidents.length}</span>Anomalies détectées</h2>
       <div class="pills" role="group" aria-label="Filtrer les anomalies">${["Toutes", "Critiques", "En cours", "Résolues"].map(f =>
         `<button type="button" class="pill" data-action="filter" data-value="${f}" aria-pressed="${S.filter === f}">${f}</button>`).join("")}</div>
     </div>
-    <div class="table-wrap"><table class="data anomalies"><thead><tr>
-      <th scope="col">Gravité</th><th scope="col">Anomalie</th><th scope="col">Table</th><th scope="col">Niveau de preuve</th><th scope="col">Action</th>
+    <div class="table-wrap table-scroll"><table class="data anomalies"><thead><tr>
+      <th scope="col">Gravité</th><th scope="col">Anomalie</th><th scope="col">Table</th><th scope="col">Statut</th><th scope="col">Action</th>
     </tr></thead><tbody>${body}</tbody></table></div></section>`;
 
   const p = d.pending;
@@ -194,7 +194,17 @@ function viewOverview() {
     </div></section>`;
   const alert = d.error ? `<div class="card pad notice error" role="alert">Analyse impossible : ${esc(d.error)}</div>`
     : d.warning ? `<div class="card pad notice" role="status">${esc(d.warning)}</div>` : "";
-  return head + alert + kpis + revenueCard(d) + `<div class="split">${table}<div class="col-side">${pending}${legend}</div></div>`;
+  return head + alert + kpis + `<div class="split"><div class="col-main stack">${revenueCard(d)}${table}</div>
+    <div class="col-side">${pending}${legend}</div></div>`;
+}
+
+// Couleur d'une carte indicateur : rouge/orange si une action est attendue, vert sinon.
+function kpiTone(k) {
+  const n = parseInt(k.value, 10) || 0;
+  if (k.label === "Anomalies ouvertes") return n ? ["red", "⚠"] : ["green", "✓"];
+  if (k.label === "Enquêtes en cours") return ["blue", "⟳"];
+  if (k.label === "Corrections à valider") return n ? ["orange", "✎"] : ["green", "✓"];
+  return ["teal", "◷"];
 }
 
 function revenueCard(d) {
@@ -212,15 +222,83 @@ function revenueCard(d) {
   return `<section class="card article" aria-label="Chiffre d'affaires">
     <div class="row-between"><h2>${esc(rv.title)}</h2>${badge(verdict[0], verdict[1])}</div>
     <p class="article-text">${esc(rv.summary)}</p>
+    ${revenueChart(rv)}
     ${rows.length ? `<div class="fact-rows">${rows.join("")}</div>` : ""}
     <div class="note" style="margin-top:12px;line-height:1.5">${esc(rv.note)}</div></section>`;
 }
+
+// Deux courbes : chiffre d'affaires observé et attendu (médiane des 4 mêmes jours précédents), jours anormaux marqués.
+const eur = v => v == null ? "—" : Math.round(v).toLocaleString("fr-FR") + " €";
+const dmy = day => `${day.slice(8, 10)}/${day.slice(5, 7)}/${day.slice(0, 4)}`;
+function revenueChart(rv) {
+  const pts = rv.series || [];
+  if (pts.length < 2) return "";
+  const W = 820, H = 230, L = 64, R = 92, T = 14, B = 28, slot = (W - L - R) / (pts.length - 1);
+  const vals = pts.flatMap(p => [p.observed, p.expected]).filter(v => v != null);
+  const top = Math.max(...vals) || 1, max = top * 1.08;
+  const x = i => L + i * slot;
+  const y = v => T + (H - T - B) * (1 - v / max);
+  const path = key => {
+    let d = "", pen = "M";
+    pts.forEach((p, i) => { if (p[key] == null) { pen = "M"; return; } d += `${pen}${x(i).toFixed(1)},${y(p[key]).toFixed(1)} `; pen = "L"; });
+    return d;
+  };
+  const kfmt = v => v >= 1000 ? Math.round(v / 1000).toLocaleString("fr-FR") + " k€" : Math.round(v) + " €";
+  const grid = [0, .25, .5, .75, 1].map(f => top * f).map(v => `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" class="grid"/>
+    <text x="${L - 8}" y="${y(v) + 4}" class="axis" text-anchor="end">${kfmt(v)}</text>`).join("");
+  const step = Math.max(1, Math.ceil(pts.length / 8));
+  const xl = pts.map((p, i) => i % step && i !== pts.length - 1 ? "" :
+    `<text x="${x(i)}" y="${H - 8}" class="axis" text-anchor="middle">${p.day.slice(8, 10)}/${p.day.slice(5, 7)}</text>`).join("");
+  const ws = pts.findIndex(p => p.day >= rv.window_start);
+  const shade = ws > 0 ? `<rect x="${x(ws)}" y="${T}" width="${W - R - x(ws)}" height="${H - T - B}" class="window"/>
+    <text x="${x(ws) + 6}" y="${T + 12}" class="axis">Période analysée</text>` : "";
+  const marks = pts.map((p, i) => p.flag ? `<circle cx="${x(i)}" cy="${y(p.observed)}" r="6" class="flag-${p.flag}"/>` : "").join("");
+  const last = pts[pts.length - 1];
+  let ly1 = y(last.observed), ly2 = last.expected != null ? y(last.expected) : null;
+  if (ly2 != null && Math.abs(ly1 - ly2) < 14) [ly1, ly2] = ly1 < ly2 ? [ly1 - 6, ly2 + 8] : [ly1 + 8, ly2 - 6];
+  const labels = `<text x="${W - R + 8}" y="${ly1 + 4}" class="lbl">Observé</text>`
+    + (ly2 != null ? `<text x="${W - R + 8}" y="${ly2 + 4}" class="lbl lbl-muted">Attendu</text>` : "");
+  const hits = pts.map((p, i) => `<rect x="${x(i) - slot / 2}" y="${T}" width="${slot}" height="${H - T - B}" class="hit" data-i="${i}"/>`).join("");
+  const table = `<details class="chart-table"><summary>Voir les données du graphique</summary>${resultTable(pts.map(p => ({
+    "Jour": dmy(p.day), "Observé": eur(p.observed), "Attendu": eur(p.expected),
+    "Écart": p.expected ? `${p.observed >= p.expected ? "+" : ""}${Math.round((p.observed - p.expected) / p.expected * 100)} %` : "—",
+    "Signal": p.flag === "drop" ? "Baisse anormale" : p.flag === "spike" ? "Hausse anormale" : "" })))}</details>`;
+  return `<div class="rev-chart" data-series="${esc(JSON.stringify(pts))}">
+    <div class="chart-legend"><span><i class="key key-obs"></i>CA observé</span><span><i class="key key-exp"></i>CA attendu (référence)</span>
+      <span><i class="dot flag-drop"></i>Baisse anormale</span><span><i class="dot flag-spike"></i>Hausse anormale</span></div>
+    <div class="chart-box"><svg viewBox="0 0 ${W} ${H}" class="chart" role="img" aria-label="Chiffre d'affaires quotidien observé et attendu">
+      ${shade}${grid}${xl}<path d="${path("expected")}" class="line-exp"/><path d="${path("observed")}" class="line-obs"/>${marks}${labels}
+      <line class="cross" x1="0" x2="0" y1="${T}" y2="${H - B}" visibility="hidden"/>${hits}</svg>
+    <div class="chart-tip" hidden></div></div>${table}</div>`;
+}
+
+// Survol du graphique : ligne verticale et infobulle du jour pointé.
+document.addEventListener("mouseover", ev => {
+  const t = ev.target;
+  const box = t.closest ? t.closest(".rev-chart") : null;
+  document.querySelectorAll(".rev-chart").forEach(c => {
+    if (c !== box || !t.classList.contains("hit")) { c.querySelector(".chart-tip").hidden = true; c.querySelector(".cross").setAttribute("visibility", "hidden"); }
+  });
+  if (!box || !t.classList.contains("hit")) return;
+  const p = JSON.parse(box.dataset.series)[+t.dataset.i];
+  const svg = box.querySelector("svg"), cross = box.querySelector(".cross");
+  const cx = +t.getAttribute("x") + +t.getAttribute("width") / 2;
+  cross.setAttribute("x1", cx); cross.setAttribute("x2", cx); cross.setAttribute("visibility", "visible");
+  const ecart = p.expected ? Math.round((p.observed - p.expected) / p.expected * 100) : null;
+  const tip = box.querySelector(".chart-tip");
+  tip.innerHTML = `<strong>${dmy(p.day)}</strong><br>Observé : ${eur(p.observed)}<br>Attendu : ${eur(p.expected)}`
+    + (ecart != null ? `<br>Écart : ${ecart >= 0 ? "+" : ""}${ecart} %` : "")
+    + (p.flag ? `<br><b>${p.flag === "drop" ? "Baisse anormale" : "Hausse anormale"}</b>` : "");
+  tip.hidden = false;
+  const scale = svg.clientWidth / svg.viewBox.baseVal.width;
+  tip.style.left = Math.max(0, Math.min(cx * scale + 12, svg.clientWidth - 200)) + "px";
+});
 
 // ================================================================== Écran 2 — Import et profilage
 function viewImport() {
   const kind = S.data && S.data.source_kind;
   const head = pageHead(`<h1>Importer et profiler des données</h1>
-    <div class="subtitle">Étape 1 sur 5 : déposez un CSV de ventes, DataSentinel AI analyse sa structure et sa qualité.</div>`, "");
+    <div class="subtitle">Étape 1 sur 5 : déposez un ou plusieurs fichiers CSV, quelle que soit leur structure ; DataSentinel AI détecte leur format et analyse leur qualité.</div>`, "");
   const drop = `<section class="import-zone" aria-label="Import">
     <div class="dropzone" id="dropzone">
       <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#0B6E7A" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
@@ -232,9 +310,8 @@ function viewImport() {
       <div class="note">Les fichiers restent sur cette machine tant que le traitement local est actif.</div>
     </div>
     <div class="card demo">
-      <h2>Ou utiliser un jeu de démonstration</h2>
-      <p>Meridian Retail : 4 tables liées, sans donnée personnelle, avec des incidents connus.</p>
-      <button type="button" class="btn btn-outline" data-action="load-lab">Charger Meridian Retail</button>
+      <h2>Options de lecture</h2>
+      <p>Séparateur, encodage, format des dates et des décimales sont détectés automatiquement ; forcez le séparateur si besoin.</p>
       <label class="field" for="separator" style="margin:0">Séparateur</label>
       <select id="separator" data-change="sep">
         ${[["auto", "Détection automatique"], ["comma", "Virgule"], ["semicolon", "Point-virgule"]].map(([v, l]) =>
@@ -247,7 +324,7 @@ function viewImport() {
   const current = tables.find(t => t.table === S.profileTable) || tables.find(t => t.table === "orders") || tables[0];
   const what = current ? (kind === "sqlserver" ? `Profil de la table ${current.table}` : `Profil du fichier ${current.table}.csv`)
                        : "Profil du fichier";
-  const rows = !S.dbPath ? `<tr class="empty-row"><td colspan="5">Aucune source : choisissez un fichier ou chargez le jeu de démonstration.</td></tr>`
+  const rows = !S.dbPath ? `<tr class="empty-row"><td colspan="5">Aucune source : choisissez un fichier CSV.</td></tr>`
     : !current ? `<tr class="empty-row"><td colspan="5">Profilage en cours…</td></tr>`
     : current.columns.map(c => `<tr><td class="mono">${esc(c.name)}</td><td>${esc(c.type)}</td><td>${esc(c.missing)}</td>
         <td>${esc(c.distinct)}</td><td>${badge(c.alert, ALERT_CLASS[c.alert] || "b-neutral", true)}</td></tr>`).join("");
@@ -258,7 +335,7 @@ function viewImport() {
       <div class="muted" style="font-size:14px;margin-top:2px">Aperçu du profilage : colonnes, valeurs manquantes, doublons${current ? ` · ${current.rows.toLocaleString("fr-FR")} lignes` : ""}</div></div>
       <div class="actions" style="display:flex;flex-wrap:wrap;gap:12px">
         <button type="button" class="btn btn-secondary" data-action="reprofile" ${S.dbPath ? "" : "disabled"}>Relancer le profilage</button>
-        <a class="btn btn-primary" href="#/enquete" data-action="detect">Détecter les anomalies</a></div></div>
+        <a class="btn btn-primary" href="#/vue-ensemble" data-action="detect">Détecter les anomalies</a></div></div>
     ${tablePills}
     <div class="table-wrap"><table class="data profile"><thead><tr><th scope="col">Colonne</th><th scope="col">Type détecté</th>
       <th scope="col">Valeurs manquantes</th><th scope="col">Valeurs distinctes</th><th scope="col">Alerte</th></tr></thead>
@@ -268,7 +345,26 @@ function viewImport() {
     <h2 style="margin-bottom:12px">Contrôles à exécuter</h2>
     <div class="checks">${CHECKS.map(([k, l]) => `<label><input type="checkbox" data-change="check" value="${k}" ${S.checks.includes(k) ? "checked" : ""}>${l}</label>`).join("")}</div>
   </section>`;
-  return head + drop + profile + checks;
+  return head + drop + profile + importCard(current && current.import) + checks;
+}
+
+// Ce que l'import a détecté dans le fichier : format, ambiguïtés, lignes écartées, aperçu brut.
+function importCard(imp) {
+  if (!imp) return "";
+  const facts = `Encodage ${esc(imp.encoding)} · séparateur ${esc(imp.delimiter)} · ${imp.rows.toLocaleString("fr-FR")} ligne(s) importée(s)`
+    + (imp.bad_line_count ? ` · ${imp.bad_line_count} ligne(s) mal formée(s) écartée(s)` : "")
+    + (imp.duplicate_rows ? ` · ${imp.duplicate_rows} ligne(s) en double` : "");
+  const warnings = imp.warnings.length
+    ? `<ul class="impact">${imp.warnings.map(w => `<li>${esc(w)}</li>`).join("")}</ul>`
+    : `<p class="card-text">Aucune ambiguïté : le format du fichier a été reconnu sans hésitation.</p>`;
+  const bad = imp.bad_lines.length ? `<h3 style="margin:14px 0 6px">Lignes mal formées</h3>${resultTable(imp.bad_lines.map(b =>
+      ({ "Ligne": b.line, "Champs attendus": b.expected, "Champs trouvés": b.found, "Contenu": b.excerpt })))}` : "";
+  const preview = !imp.preview.length ? "" : `<div class="btn-row"><button type="button" class="btn btn-secondary btn-compact"
+      data-action="toggle-preview" aria-expanded="${!!S.showPreview}">${S.showPreview ? "Masquer" : "Afficher"} l'aperçu des premières lignes</button></div>`
+    + (!S.showPreview ? "" : `<h3 style="margin:14px 0 6px">Aperçu des premières lignes (valeurs brutes du fichier)</h3>
+    ${resultTable(imp.preview.map(r => Object.fromEntries(imp.preview_columns.map(c => [c === "_ligne_source" ? "Ligne" : c, r[c]]))))}`);
+  return `<section class="card pad" aria-label="Diagnostic d'import"><h2 style="margin-bottom:6px">Diagnostic d'import : ${esc(imp.file)}</h2>
+    <p class="card-text">${facts}</p>${warnings}${bad}${preview}</section>`;
 }
 
 // ================================================================== Écran 3 — Enquête des agents
@@ -290,6 +386,8 @@ function viewInvestigation() {
       <div class="agent-name">${esc(a.name)}</div>${badge(lbl, cls, true)}<div class="agent-desc">${esc(a.description)}</div></div>`;
   }).join("")}</section>`;
 
+  if (inc && inc.quality) return pageHead(`${back}<h1 class="after-back">${esc(heading)}</h1><div class="subtitle">${esc(sub)}</div>`,
+    `<a class="btn btn-primary" href="#/rapport?i=${encodeURIComponent(inc.id)}">Voir la correction et le rapport</a>`) + qualityDetail(inc);
   let left;
   if (!inc) {
     left = `<div class="card article"><p class="article-text" style="margin:0">${d && d.running
@@ -398,6 +496,11 @@ function viewReport() {
       <div class="note" style="margin-top:10px">Chaque requête est journalisée avec son résultat et la version du modèle utilisé.</div></article>
     <article class="card article"><h2 style="margin-bottom:12px">4. Plan de correction proposé</h2>
       ${r.plan ? `<ol class="plan">${r.plan.steps.map(s => `<li>${esc(s)}</li>`).join("")}</ol>
+        ${r.plan.executable ? changesView(r.plan.id) : ""}
+        ${r.plan.sql ? `<h3 class="sub-h">Requête de correction à exécuter</h3>
+          <p class="card-text" style="margin:0 0 8px 0">À exécuter par votre équipe data, dans une transaction, après sauvegarde de la table et après validation. L'application ne l'exécute jamais sur la source.</p>
+          <pre class="code">${esc(r.plan.sql)}</pre>
+          <div class="btn-row"><button type="button" class="btn btn-secondary btn-compact" data-action="copy-sql">Copier la requête</button></div>` : ""}
         <p class="note" style="margin:10px 0 0 0;line-height:1.5">Retour arrière : ${esc(r.plan.rollback)}</p>`
         : `<p class="card-text" style="margin:0">Aucun plan de correction : la cause n'est pas déterminée.</p>`}</article>
   </section>`;
@@ -438,6 +541,93 @@ function viewReport() {
   return head + `<div class="split">${content}<div class="col-side w320">${testCard}${validation}${trace}</div></div>`;
 }
 
+// Constat de qualité : diagnostic, lignes concernées, graphique, recommandation et correction proposée.
+function qualityDetail(inc) {
+  const q = inc.quality;
+  const st = q.status === "Erreur confirmée" ? "b-critical" : "b-hypothesis";
+  const diag = `<section class="card article" aria-label="Diagnostic"><div class="row-between"><h2>Diagnostic</h2>
+      <div class="badges">${badge(q.status, st)} ${badge(inc.severity_label, SEVERITY_CLASS[inc.severity])}</div></div>
+    <dl class="diag">
+      <dt>Catégorie</dt><dd>${esc(q.category)}</dd>
+      <dt>Règle</dt><dd>${esc(q.rule)}</dd>
+      <dt>Méthode</dt><dd>${esc(q.method)}</dd>
+      <dt>Lignes concernées</dt><dd>${q.count} sur ${q.total}</dd>
+      <dt>Confiance</dt><dd>${esc(q.confidence)}</dd>
+      <dt>Justification</dt><dd>${esc(q.justification)}</dd>
+      <dt>Limites</dt><dd>${esc(q.limits)}</dd>
+    </dl></section>`;
+  const hasExp = q.rows.some(r => r.expected !== undefined);
+  const rows = `<section class="card article" aria-label="Lignes concernées"><h2 style="margin-bottom:6px">Lignes concernées</h2>
+    <p class="card-text" style="margin:0">${q.count > q.rows.length ? `${q.rows.length} premières lignes sur ${q.count}.` : `${q.count} ligne(s).`}
+      La valeur observée est celle de la table analysée.</p>
+    ${resultTable(q.rows.map(r => Object.assign({ [q.ident_label]: r.ident, "Colonne": r.column,
+      "Valeur observée": r.value === null ? "(vide)" : r.value }, hasExp ? { "Valeur attendue": r.expected ?? "—" } : {})))}
+    <details class="chart-table"><summary>Requête de preuve (rejouable)</summary><pre class="code">${esc(q.evidence.sql)}</pre></details></section>`;
+  const chart = q.chart ? `<section class="card article" aria-label="Distribution"><h2 style="margin-bottom:6px">Distribution des valeurs</h2>
+    <p class="card-text" style="margin:0">Barres : nombre de lignes par tranche de valeurs. En rouge : les valeurs extrêmes signalées.</p>
+    ${histogram(q.chart)}</section>` : "";
+  const corr = q.correction;
+  const reco = `<section class="card pad reco-card" aria-label="Recommandation"><h2 style="margin-bottom:8px">Recommandation</h2>
+    <p class="card-text" style="color:var(--ink);font-size:15px">${esc(q.recommendation)}</p>
+    <h3 class="sub-h">Correction proposée</h3>
+    ${corr && corr.sql ? `<p class="card-text" style="margin:0 0 8px 0">${esc(corr.description)} ${esc(corr.consequences || "")}</p>
+      <a class="btn btn-primary btn-block" href="#/rapport?i=${encodeURIComponent(inc.id)}">Voir la correction et la valider</a>`
+      : `<p class="card-text" style="margin:0">Aucune correction automatique : la valeur correcte ne peut pas être déduite des données.
+        La correction se fait dans le système source.</p>`}
+    ${q.decision ? `<div class="inline-result">Décision enregistrée : ${esc({ approve: "approuvée", reject: "refusée", modify: "modifiée" }[q.decision])}.</div>` : ""}
+  </section>`;
+  return `<div class="split"><section class="col-main stack" aria-label="Constat">${diag}${chart}${rows}</section>
+    <div class="col-side w320">${reco}</div></div>`;
+}
+
+// Histogramme d'une colonne numérique ; les valeurs extrêmes signalées sont marquées en rouge.
+function histogram(c) {
+  const W = 640, H = 170, L = 44, R = 12, T = 10, B = 30;
+  const n = c.counts.length, max = Math.max(...c.counts) || 1;
+  const lo = c.edges[0], hi = c.edges[n];
+  const x = v => L + (v - lo) / ((hi - lo) || 1) * (W - L - R);
+  const y = v => T + (H - T - B) * (1 - v / max);
+  const bw = (W - L - R) / n;
+  const bars = c.counts.map((k, i) => k ? `<rect x="${(L + i * bw + 1).toFixed(1)}" y="${y(k).toFixed(1)}" width="${Math.max(bw - 2, 1).toFixed(1)}"
+    height="${(H - B - y(k)).toFixed(1)}" rx="2" class="bar"><title>${c.edges[i].toLocaleString("fr-FR")} à ${c.edges[i + 1].toLocaleString("fr-FR")} : ${k} ligne(s)</title></rect>` : "").join("");
+  const marks = c.flagged.map(v => `<line x1="${x(v)}" x2="${x(v)}" y1="${T}" y2="${H - B}" class="flag-line"/>
+    <circle cx="${x(v)}" cy="${T + 6}" r="5" class="flag-dot"><title>Valeur signalée : ${v.toLocaleString("fr-FR")}</title></circle>`).join("");
+  const med = `<line x1="${x(c.median)}" x2="${x(c.median)}" y1="${T}" y2="${H - B}" class="median"/>
+    <text x="${x(c.median) + 4}" y="${T + 22}" class="axis">médiane</text>`;
+  const ticks = [[lo, "start"], [(lo + hi) / 2, "middle"], [hi, "end"]].map(([v, a]) =>
+    `<text x="${x(v)}" y="${H - 10}" class="axis" text-anchor="${a}">${Math.round(v).toLocaleString("fr-FR")}</text>`).join("");
+  return `<svg viewBox="0 0 ${W} ${H}" class="chart hist" role="img" aria-label="Distribution des valeurs">
+    <line x1="${L}" x2="${W - R}" y1="${H - B}" y2="${H - B}" class="grid"/>${bars}${med}${marks}${ticks}</svg>`;
+}
+
+// Enregistrements à corriger : identifiant, valeur actuelle -> valeur proposée (calculés sur une copie).
+function changesView(planId) {
+  const key = S.runId + "|" + planId;
+  S.changes = S.changes || {};
+  if (!(key in S.changes)) {
+    S.changes[key] = null;
+    api(`/runs/${S.runId}/plans/changes?plan_id=${encodeURIComponent(planId)}`)
+      .then(c => { S.changes[key] = c; }).catch(e => { S.changes[key] = { error: e.message }; })
+      .then(() => { if (route().key === "report") render(); });
+  }
+  const ch = S.changes[key];
+  const head = `<h3 class="sub-h">Enregistrements à corriger</h3>`;
+  if (ch === null) return head + `<p class="card-text">Calcul des lignes concernées sur une copie…</p>`;
+  if (ch.error) return head + `<p class="card-text">${esc(ch.error)}</p>`;
+  if (!ch.length) return head + `<p class="card-text">La correction ne modifie aucune ligne existante.</p>`;
+  const fmt = v => v === null || v === undefined ? "(vide)" : String(v);
+  return head + ch.map(t => {
+    const keyLabel = t.key === "_ligne_source" ? "Ligne du fichier" : (t.key || "Ligne");
+    const rows = t.changes.map(c => c.action === "modifiée"
+      ? Object.entries(c.changes).map(([col, v]) => ({ [keyLabel]: c.key, "Action": "Modifier", "Colonne": col,
+          "Valeur actuelle": fmt(v["actuelle"]), "Valeur proposée": fmt(v["proposée"]) }))
+      : [{ [keyLabel]: c.key ?? "—", "Action": c.action === "supprimée" ? "Supprimer" : "Ajouter", "Colonne": "(ligne entière)",
+          "Valeur actuelle": c.action === "supprimée" ? Object.entries(c.row).slice(0, 4).map(([k, v]) => `${k}=${fmt(v)}`).join(", ") : "—",
+          "Valeur proposée": c.action === "ajoutée" ? Object.entries(c.row).slice(0, 4).map(([k, v]) => `${k}=${fmt(v)}`).join(", ") : "—" }]).flat();
+    return `<p class="card-text" style="margin:6px 0 0 0">Table <span class="mono">${esc(t.table)}</span> : ${t.total} ligne(s) concernée(s)${t.total > t.changes.length ? `, ${t.changes.length} premières affichées` : ""}.</p>${resultTable(rows)}`;
+  }).join("");
+}
+
 // ================================================================== Journal d'audit et Paramètres
 function viewAudit() {
   if (S.audit === null && !S.auditLoading) loadAudit();
@@ -447,13 +637,36 @@ function viewAudit() {
   const filters = `<section class="card pad" aria-label="Filtres du journal"><div class="checks" style="grid-template-columns:repeat(2,minmax(0,1fr))">
     <label><input type="checkbox" data-change="audit-all" ${S.auditAll ? "checked" : ""}>Toutes les enquêtes</label>
     <label><input type="checkbox" data-change="audit-queries" ${S.auditQueries ? "checked" : ""}>Inclure les requêtes SQL</label></div></section>`;
-  const table = `<section class="card clip" aria-label="Événements"><div class="table-wrap"><table class="data profile"><thead><tr>
+  const counts = {};
+  rows.forEach(e => { const c = auditCat(e.kind)[0]; counts[c] = (counts[c] || 0) + 1; });
+  const tiles = `<section class="kpis" aria-label="Synthèse du journal">${AUDIT_CATS.map(([key, label, tone, icon]) =>
+    `<div class="card kpi tone-${tone}"><div class="kpi-top"><span class="kpi-icon" aria-hidden="true">${icon}</span><span class="kpi-label">${label}</span></div>
+      <div class="kpi-value">${counts[key] || 0}</div><div class="kpi-sub">événement(s)</div></div>`).join("")}</section>`;
+  const table = `<section class="card clip audit-card" aria-label="Événements"><div class="card-head band"><h2>Événements</h2></div><div class="table-wrap"><table class="data profile audit"><thead><tr>
     <th scope="col">Horodatage</th><th scope="col">Enquête</th><th scope="col">Acteur</th><th scope="col">Type</th><th scope="col">Détail</th></tr></thead>
     <tbody>${S.audit === null ? `<tr class="empty-row"><td colspan="5">Chargement…</td></tr>` : rows.length ? rows.map(e => `<tr>
-      <td class="mono">${esc(e.time)}</td><td class="mono">${esc(e.run_id)}</td><td>${esc(e.actor)}</td><td class="mono">${esc(e.kind)}</td>
+      <td class="mono">${esc(e.time)}</td><td class="mono">${esc(e.run_id)}</td><td>${esc(e.actor)}</td><td>${badge(auditCat(e.kind)[1], "b-" + auditCat(e.kind)[2], true)}</td>
       <td style="font-size:13px;word-break:break-word">${esc(e.detail)}</td></tr>`).join("") : `<tr class="empty-row"><td colspan="5">Aucun événement.</td></tr>`}</tbody>
     </table></div></section>`;
-  return head + filters + table;
+  return head + tiles + filters + table;
+}
+
+// Familles d'événements du journal : [clé, libellé, couleur de carte, icône] et badge de chaque ligne.
+const AUDIT_CATS = [["analysis", "Analyses", "blue", "⟳"], ["decision", "Décisions", "green", "✓"],
+                    ["test", "Tests et requêtes", "orange", "⚗"], ["other", "Exports et sources", "teal", "⇩"]];
+const AUDIT_LABELS = {
+  run_started: "Analyse lancée", agent_step: "Étape d'agent", narrative: "Synthèse rédigée", report_built: "Rapport produit",
+  report_exported: "Rapport exporté", human_decision: "Décision humaine", hypothesis_dismissed: "Hypothèse écartée",
+  analyst_hypothesis: "Hypothèse ajoutée", analyst_hypothesis_tested: "Hypothèse testée", run_paused: "Enquête en pause",
+  run_resumed: "Enquête reprise", query: "Requête SQL", query_rerun: "Requête relancée", sandbox_test: "Test sur une copie",
+  sqlserver_extract: "Extraction SQL Server",
+};
+function auditCat(kind) {
+  const label = AUDIT_LABELS[kind] || kind.replace(/_/g, " ");
+  if (/decision|review|approv|reject|dismiss|paused|resumed|^analyst_hypothesis$/.test(kind)) return ["decision", label, "confirmed"];
+  if (/test|query|rerun|sandbox|verif/.test(kind)) return ["test", label, "high"];
+  if (/^run_|detect|investig|impact|narrat|agent/.test(kind)) return ["analysis", label, "observed"];
+  return ["other", label, "neutral"];
 }
 
 async function loadAudit() {
@@ -473,12 +686,6 @@ function viewSettings() {
   const prefs = `<section class="card pad" aria-label="Préférences"><h2 style="margin-bottom:12px">Préférences</h2>
     <label class="field" for="actor">Votre nom (enregistré dans le journal d'audit)</label>
     <input type="text" id="actor" value="${esc(S.actor)}" data-change="actor">
-    <div class="field" style="margin-top:16px" id="accent-label">Couleur d'accent</div>
-    <div class="swatches" role="radiogroup" aria-labelledby="accent-label">${ACCENTS.map(([c, , name]) => `<label>
-      <input type="radio" name="accent" value="${c}" data-change="accent" ${S.accent === c ? "checked" : ""}>
-      <span class="swatch" style="background:${c}" aria-hidden="true"></span>${name}</label>`).join("")}</div>
-    <label class="field" for="scenario" style="margin-top:16px">Scénario du jeu Meridian Retail</label>
-    <select id="scenario" data-change="scenario">${Object.entries(SCENARIOS).map(([k, l]) => `<option value="${k}" ${S.scenario === k ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>
   </section>`;
   const sql = `<section class="card pad" aria-label="SQL Server"><h2 style="margin-bottom:8px">SQL Server (lecture seule)</h2>
     <p class="card-text">${st ? `Serveur ${esc(st.sqlserver.server)} · base ${esc(st.sqlserver.database)} · pilote ${esc(st.sqlserver.driver)} · ${esc(st.sqlserver.auth)}. Modifiable dans le fichier .env.` : "Chargement…"}</p>
@@ -489,15 +696,7 @@ function viewSettings() {
     <p class="card-text">Rédaction actuelle : ${st ? esc(st.llm) : "…"}. Le modèle ne fait que reformuler des faits établis : aucune ligne de données n'est envoyée, aucun statut n'est décidé par le modèle.</p>
     <button type="button" class="btn btn-secondary" data-action="llm-check">Tester la connexion à Claude</button>
     <div class="result-box" aria-live="polite">${S.testResult.llm || "Aucun test effectué."}</div></section>`;
-  const ev = S.evaluation;
-  const evalCard = `<section class="card pad" aria-label="Évaluation"><h2 style="margin-bottom:8px">Évaluation sur le jeu Meridian Retail</h2>
-    <p class="card-text">Exécute les 7 scénarios et compare les conclusions à la vérité de référence.</p>
-    <button type="button" class="btn btn-secondary" data-action="evaluate">Lancer l'évaluation</button>
-    ${ev === "running" ? `<div class="result-box">Évaluation en cours…</div>` : ev ? `<div class="result-box">
-      Taux de détection : ${Math.round(ev.metrics.detection_rate * 100)} % · Justesse du diagnostic : ${Math.round(ev.metrics.diagnosis_accuracy * 100)} %
-      · Causes confirmées : ${Math.round(ev.metrics.confirmed_rate * 100)} % · Fausses alertes : ${ev.metrics.false_alerts}</div>${resultTable(ev.rows)}` : ""}
-  </section>`;
-  return head + prefs + sql + llm + evalCard;
+  return head + prefs + sql + llm;
 }
 
 // ------------------------------------------------------------------ actions
@@ -566,26 +765,29 @@ const dialogButtons = (ok, cls = "btn-primary") => `<div class="field-error" rol
 const actions = {
   filter: el => { S.filter = el.dataset.value; render(); },
   analyse: () => startAnalysis(null),
-  detect: (el, ev) => { ev.preventDefault(); startAnalysis("#/enquete"); },
+  detect: (el, ev) => { ev.preventDefault(); startAnalysis("#/vue-ensemble"); },
   "change-source": () => openDialog(`<h2 id="dialog-title">Changer de source</h2>
       <p>${esc(S.data ? S.data.source : "")}</p>
       <div class="btn-col" style="margin-top:0">
         <button type="submit" class="btn btn-outline btn-block" value="ok" data-choice="default">Revenir à la base SQL Server reliée</button>
         <button type="submit" class="btn btn-secondary btn-block" value="ok" data-choice="sql">Extraire un instantané frais de la base SQL Server et l'analyser</button>
-        <button type="submit" class="btn btn-secondary btn-block" value="ok" data-choice="lab">Charger Meridian Retail</button>
         <button type="submit" class="btn btn-secondary btn-block" value="ok" data-choice="csv">Importer des fichiers CSV</button>
       </div><div class="field-error" role="alert"></div>
       <div class="dialog-actions"><button type="submit" class="btn btn-secondary" value="cancel" formnovalidate>Fermer</button></div>`,
     async (_, submitter) => {
       const choice = submitter.dataset.choice;
       if (choice === "csv") { location.hash = "#/import"; return; }
-      if (choice === "lab") await useSource(await api("/sources/lab", { json: { scenario: S.scenario } }));
       if (choice === "default") await useDefaultSource();
       if (choice === "sql") { await useDefaultSource(true); await startAnalysis(null); }
     }),
   "pick-file": () => $("#file-input").click(),
-  "load-lab": async () => { try { await useSource(await api("/sources/lab", { json: { scenario: S.scenario } })); } catch (e) { toast(e.message, true); } },
+  "copy-sql": async () => {
+    const r = S.data && S.data.incident && S.data.incident.report;
+    try { await navigator.clipboard.writeText(r.plan.sql); toast("Requête copiée."); }
+    catch (e) { toast("Copie impossible : sélectionnez la requête à la main.", true); }
+  },
   reprofile: () => loadProfile(),
+  "toggle-preview": () => { S.showPreview = !S.showPreview; render(); },
   "profile-table": el => { S.profileTable = el.dataset.value; render(); },
   pause: async () => {
     try { await api(`/runs/${S.runId}/pause`, { json: { paused: !S.data.paused, actor: S.actor } });
@@ -703,11 +905,6 @@ const actions = {
     try { const r = await api("/llm/check", { method: "POST" }); S.testResult.llm = esc(r.message); } catch (e) { S.testResult.llm = esc(e.message); }
     render();
   },
-  evaluate: async () => {
-    S.evaluation = "running"; render();
-    try { S.evaluation = await api("/evaluation", { method: "POST" }); } catch (e) { S.evaluation = null; toast(e.message, true); }
-    render();
-  },
 };
 
 function testHtml(t) {
@@ -741,8 +938,6 @@ const changes = {
   sep: el => { S.sep = el.value; save(); },
   check: () => { S.checks = [...document.querySelectorAll('input[data-change="check"]:checked')].map(i => i.value); save(); },
   actor: el => { S.actor = el.value.trim() || "analyste"; save(); },
-  accent: el => { S.accent = el.value; save(); applyAccent(); },
-  scenario: el => { S.scenario = el.value; save(); },
   "audit-all": el => { S.auditAll = el.checked; loadAudit(); },
   "audit-queries": el => { S.auditQueries = el.checked; loadAudit(); },
 };
@@ -780,7 +975,6 @@ window.addEventListener("hashchange", async () => {
 });
 
 (async function init() {
-  applyAccent();
   await refresh();
   if (route().key === "import") loadProfile();
 })();

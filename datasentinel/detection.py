@@ -306,13 +306,19 @@ def detect_integrity(wh: Warehouse, ctx: DetectionContext) -> list[Anomaly]:
 
 
 DETECTORS = [detect_daily, detect_freshness, detect_duplicates, detect_prices, detect_categories, detect_integrity]
+# Tables couvertes par les contrôles commerce (modèle commandes/produits) : les contrôles génériques
+# s'appliquent à toutes les autres tables, et à toutes les tables quand ce modèle est absent.
+RETAIL_TABLES = {"orders", "products", "products_snapshot", "customers", "pipeline_logs"}
 
 # Familles de contrôles proposées à l'analyste (cases à cocher de l'interface).
 # Les doublons relèvent du volume ; les règles d'intégrité ligne à ligne, des montants.
-CHECKS = {"volume": "Volume", "freshness": "Fraîcheur", "amounts": "Montants", "categories": "Catégories"}
+CHECKS = {"quality": "Qualité des données", "volume": "Volume", "freshness": "Fraîcheur", "amounts": "Montants",
+          "categories": "Catégories"}
 
 
 def check_of(kind: str) -> str:
+    if kind.startswith("quality_"):
+        return "quality"
     if kind.startswith("volume_") or kind == "duplicate_keys":
         return "volume"
     if kind == "freshness":
@@ -322,21 +328,35 @@ def check_of(kind: str) -> str:
     return "amounts"  # revenue_*, price_outlier, integrity
 
 
-def run_detection(wh: Warehouse, settings: Settings | None = None, as_of: date | None = None) -> dict:
-    """Exécute tous les détecteurs compatibles avec le schéma disponible."""
-    if not ORDERS_REQUIRED <= columns_of(wh, "orders"):
-        return {"as_of": None, "anomalies": [], "skipped": [
-            f"Table 'orders' absente ou incomplète (colonnes requises : {sorted(ORDERS_REQUIRED)})."]}
-    ctx = make_context(wh, settings, as_of)
-    anomalies, skipped = [], []
-    for detector in DETECTORS:
-        try:
-            anomalies.extend(detector(wh, ctx))
-        except Exception as exc:  # un détecteur incompatible ne bloque pas les autres
-            skipped.append(f"{detector.__name__} : {exc}")
+def is_quality(anomaly: dict) -> bool:
+    return anomaly["kind"].startswith("quality_")
+
+
+def run_detection(wh: Warehouse, settings: Settings | None = None, as_of: date | None = None,
+                  quality: bool = True) -> dict:
+    """Exécute les contrôles génériques sur toute table, et les contrôles commerce si leur modèle est présent."""
+    from .quality import detect_quality
+    from .warehouse import import_report
+
+    anomalies, skipped, ctx = [], [], None
+    retail = ORDERS_REQUIRED <= columns_of(wh, "orders")
+    if retail:
+        ctx = make_context(wh, settings, as_of)
+        for detector in DETECTORS:
+            try:
+                anomalies.extend(detector(wh, ctx))
+            except Exception as exc:  # un détecteur incompatible ne bloque pas les autres
+                skipped.append(f"{detector.__name__} : {exc}")
+    if quality:
+        tables = [t for t in wh.tables() if not (retail and t in RETAIL_TABLES)]
+        reports = {r["table"]: r for r in import_report(wh.db_path) or []}
+        found, errors = detect_quality(wh, tables, reports)
+        anomalies.extend(found)
+        skipped.extend(errors)
     return {
-        "as_of": ctx.as_of.isoformat(),
-        "window_start": ctx.window_start.isoformat(),
+        "as_of": ctx.as_of.isoformat() if ctx else None,
+        "window_start": ctx.window_start.isoformat() if ctx else None,
         "anomalies": [a.to_dict() for a in anomalies],
         "skipped": skipped,
+        "retail": retail,
     }

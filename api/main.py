@@ -18,6 +18,15 @@ from .ui import WEB_DIR, router as ui_router
 
 app = FastAPI(title="DataSentinel AI", version=__version__,
               description="De l'anomalie à la résolution : détecter, enquêter, expliquer, proposer, vérifier.")
+@app.middleware("http")
+async def no_stale_ui(request, call_next):
+    """L'interface est toujours revalidée : une mise à jour est visible sans vider le cache du navigateur."""
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 app.include_router(ui_router)
 app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 
@@ -102,7 +111,7 @@ def sqlserver_extract(svc: DataSentinel = Depends(get_service)):
 
 @app.post("/datasets/upload")
 async def upload(files: list[UploadFile] = File(...), svc: DataSentinel = Depends(get_service)):
-    content = {Path(f.filename).stem: await f.read() for f in files}
+    content = {Path(f.filename or "table.csv").name: await f.read() for f in files}
     try:
         return {"db_path": str(svc.import_csv(content))}
     except ValueError as exc:

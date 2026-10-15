@@ -16,7 +16,7 @@ from .connectors import SqlServerSource, snapshot_metadata
 from .detection import CHECKS, make_context
 from .generator import SCENARIOS, build_lab
 from .profiling import profile_warehouse
-from .remediation import Verifier, validate_sandbox_sql
+from .remediation import Verifier, plan_changes, validate_sandbox_sql
 from .report import to_html, to_json
 from .warehouse import Warehouse, load_csv_workspace
 
@@ -37,6 +37,7 @@ class DataSentinel:
         self.settings = settings or get_settings()
         self.settings.ensure_dirs()
         self.audit = AuditLog(self.settings.audit_db)
+        self._changes: dict[tuple[str, str, str], list[dict]] = {}
         self.graph = build_graph(self.settings, self.audit, checkpointer or _default_checkpointer(self.settings))
 
     # ---------------------------------------------------------------- données
@@ -45,7 +46,7 @@ class DataSentinel:
             raise ValueError(f"Scénario inconnu : {scenario}")
         return build_lab(scenario, self.settings.labs_dir)
 
-    def import_csv(self, files: dict[str, bytes], sep: str | None = ",") -> Path:
+    def import_csv(self, files: dict[str, bytes], sep: str | None = None) -> Path:
         ws = self.settings.home / "workspaces" / uuid.uuid4().hex[:10]
         return load_csv_workspace(files, ws / "warehouse.duckdb", sep=sep)
 
@@ -141,8 +142,11 @@ class DataSentinel:
         hyps: dict[str, dict] = {}
         dismissed: dict[str, dict] = {}
         paused = False
+        quality: dict[str, dict] = {}
         for e in self.audit.events(run_id):
             kind, p = e["kind"], e["payload"]
+            if kind == "human_decision" and str(p.get("plan_id", "")).startswith("q:"):
+                quality[p["plan_id"]] = {**p, "by": e["actor"], "ts": e["ts"]}
             if kind == "analyst_hypothesis":
                 hyps[p["id"]] = {**p, "author": e["actor"], "ts": e["ts"], "tested": None}
             elif kind == "analyst_hypothesis_tested" and p.get("id") in hyps:
@@ -151,7 +155,7 @@ class DataSentinel:
                 dismissed[p["key"]] = {"reason": p["reason"], "by": e["actor"], "ts": e["ts"]}
             elif kind in ("run_paused", "run_resumed"):
                 paused = kind == "run_paused"
-        return {"hypotheses": list(hyps.values()), "dismissed": dismissed, "paused": paused}
+        return {"hypotheses": list(hyps.values()), "dismissed": dismissed, "paused": paused, "quality": quality}
 
     def set_paused(self, run_id: str, paused: bool, actor: str) -> None:
         self.get(run_id)
@@ -212,6 +216,70 @@ class DataSentinel:
                                                           "passed": result["passed"]})
         return result
 
+    # ---------------------------------------------------------------- constats de qualité
+    # Identifiant de plan d'un constat : "q:<id du constat>". Sa correction n'est jamais appliquée à la source.
+    def finding(self, run_id: str, plan_id: str) -> dict:
+        state = self.get(run_id)
+        fid = plan_id.removeprefix("q:")
+        a = next((a for a in state.get("detection", {}).get("anomalies", []) if a["id"] == fid and a.get("details")), None)
+        if a is None:
+            raise ValueError(f"Constat inconnu : {fid}")
+        return a
+
+    def finding_sql(self, run_id: str, plan_id: str) -> str:
+        """Correction proposée, ou celle modifiée par l'analyste."""
+        dec = self.annotations(run_id)["quality"].get(plan_id) or {}
+        if dec.get("sql"):
+            return dec["sql"]
+        return ((self.finding(run_id, plan_id)["details"].get("correction")) or {}).get("sql") or ""
+
+    def test_finding_on_copy(self, run_id: str, plan_id: str, sql: str, actor: str) -> dict:
+        """Applique la correction sur une copie puis rejoue la requête du constat : réussi si plus aucune ligne n'est concernée."""
+        a = self.finding(run_id, plan_id)
+        if not sql.strip():
+            return {"executed": False, "passed": None, "checks": [],
+                    "reason": "Aucune correction automatique : la valeur ne peut pas être déduite des données."}
+        validate_sandbox_sql(sql)
+        with Warehouse(self.get(run_id)["db_path"]) as wh:
+            sb = wh.sandbox()
+            try:
+                for stmt in [x.strip() for x in sql.split(";") if x.strip()]:
+                    sb.execute(stmt)
+                left = len(sb.query(a["evidence"]["sql"]))
+            finally:
+                sb.close()
+        check = {"name": f"Plus aucune ligne « {a['details']['rule'].lower()} »", "passed": left == 0,
+                 "observed": f"{left} ligne(s) restante(s) sur {a['details']['count']}"}
+        self.audit.record(run_id, actor, "sandbox_test", {"plan_id": plan_id, "sql": sql, "executed": True,
+                                                          "passed": left == 0})
+        return {"executed": True, "passed": left == 0, "checks": [check], "reason": None}
+
+    def decide_finding(self, run_id: str, plan_id: str, decision: str, actor: str, comment: str | None = None,
+                       sql: str | None = None) -> None:
+        self.finding(run_id, plan_id)
+        if decision == "modify":
+            validate_sandbox_sql(sql or "")
+        self.audit.record(run_id, actor, "human_decision", {"plan_id": plan_id, "decision": decision,
+                                                            "comment": comment, "sql": sql if decision == "modify" else None})
+
+    def plan_changes(self, run_id: str, plan_id: str) -> list[dict]:
+        """Identifiants concernés par un plan, valeur actuelle -> proposée, calculés sur une copie (jamais sur la source)."""
+        state = self.get(run_id)
+        if plan_id.startswith("q:"):
+            sql = self.finding_sql(run_id, plan_id)
+        else:
+            plan = next((p for p in state.get("plans", []) if p["id"] == plan_id), None)
+            if plan is None:
+                raise ValueError(f"Plan inconnu : {plan_id}")
+            sql = plan.get("sql") if plan.get("executable_in_sandbox") else ""
+        if not sql:
+            return []
+        key = (run_id, plan_id, sql)
+        if key not in self._changes:
+            with Warehouse(state["db_path"]) as wh:
+                self._changes[key] = plan_changes(wh, sql)
+        return self._changes[key]
+
     def report(self, run_id: str) -> dict:
         state = self.get(run_id)
         if "report" not in state:
@@ -234,6 +302,11 @@ class DataSentinel:
         for p in state.get("plans", []):
             if p.get("decision") == "approved" and p.get("sql"):
                 lines += [f"-- {p['title']} (approuvé par {p.get('reviewed_by')})", "BEGIN TRANSACTION;", p["sql"], "COMMIT;", ""]
+        for plan_id, d in self.annotations(run_id)["quality"].items():
+            if d["decision"] == "approve" and (sql := self.finding_sql(run_id, plan_id)):
+                a = self.finding(run_id, plan_id)
+                lines += [f"-- {a['details']['rule']} · table {a['table']} (approuvé par {d['by']})",
+                          "BEGIN TRANSACTION;", sql, "COMMIT;", ""]
         return "\n".join(lines)
 
     def runs(self) -> list[dict]:

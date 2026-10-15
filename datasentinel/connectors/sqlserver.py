@@ -89,30 +89,41 @@ class SqlServerSource:
     def __init__(self, settings: SqlServerSettings):
         self.settings = settings
 
-    
-    def test_network(self):
-        server = self.settings.server
+    def _endpoint(self) -> tuple[str, int] | None:
+        """Hôte et port TCP du serveur ; None pour une instance nommée (port résolu par SQL Browser)."""
+        server = re.sub(r"^tcp:", "", self.settings.server.strip(), flags=re.IGNORECASE)
+        if "\\" in server:
+            return None
+        host, _, port = server.partition(",")
+        return host, int(port) if port.strip().isdigit() else 1433
+
+    def test_network(self) -> str | None:
+        """Vérifie l'accès réseau ; retourne le message d'erreur, ou None si le serveur répond."""
+        endpoint = self._endpoint()
+        if endpoint is None:
+            return None
         try:
-            with socket.create_connection((server, 1433), timeout=10):
-                return f"Connexion réseau OK vers {server}:1433"
+            with socket.create_connection(endpoint, timeout=10):
+                return None
         except Exception as e:
-            return f"Échec réseau vers {server}:1433 — {type(e).__name__}: {e}"
-
-
+            return f"Échec réseau vers {endpoint[0]}:{endpoint[1]} — {type(e).__name__}: {e}"
 
     def _connect(self):
         import pyodbc
+
+        connection_string = self.settings.connection_string()
+        if not self.settings.azure:
+            if not self.settings.trusted_connection:
+                connection_string += f"PWD={self.settings.password};"
+            con = pyodbc.connect(connection_string, timeout=10, autocommit=False)
+            con.timeout = 300
+            return con
 
         credential = ClientSecretCredential(
             tenant_id=self.settings.tenant_id,
             client_id=self.settings.client_id,
             client_secret=self.settings.client_secret,
         )
-
-        # token = credential.get_token(
-        #     "https://database.windows.net/.default"
-        # ).token
-
 
          # ajouter temporairement
         token = credential.get_token(
@@ -141,9 +152,6 @@ class SqlServerSource:
             len(token_bytes),
             token_bytes,
         )
-
-
-        connection_string = self.settings.connection_string()
 
         con = pyodbc.connect(
             connection_string,
@@ -190,19 +198,13 @@ class SqlServerSource:
     #     }
     
     def test_connection(self) -> dict:
-        import socket
-
-        try:
-            with socket.create_connection(
-                (self.settings.server, 1433), timeout=10
-            ):
-                pass
-        except Exception as exc:
+        network_error = self.test_network()
+        if network_error:
             return {
                 "ok": False,
                 "stage": "network",
                 "server": self.settings.server,
-                "error": f"{type(exc).__name__}: {exc}",
+                "error": network_error,
             }
 
         try:

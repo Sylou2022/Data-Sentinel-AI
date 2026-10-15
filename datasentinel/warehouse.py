@@ -100,30 +100,47 @@ class Sandbox(Warehouse):
         return self._run(sql, params)
 
 
-def load_csv_workspace(files: dict[str, bytes | str | Path], db_path: Path, sep: str | None = ",") -> Path:
-    """Crée une base DuckDB à partir de CSV importés (nom de table -> contenu).
+IMPORT_REPORT = "import_report.json"
 
-    sep=None : séparateur détecté automatiquement."""
-    import io
+
+def load_csv_workspace(files: dict[str, bytes | str | Path], db_path: Path, sep: str | None = None) -> Path:
+    """Crée une base DuckDB à partir de CSV importés (nom de fichier -> contenu), sans schéma imposé.
+
+    sep=None : séparateur détecté automatiquement. Le rapport d'import (types inférés, ambiguïtés,
+    lignes mal formées, aperçu) est écrit à côté de la base, dans import_report.json."""
+    import json
+
+    from .ingestion import read_csv
 
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     if db_path.exists():
         db_path.unlink()
+    reports = []
     con = duckdb.connect(str(db_path))
     try:
         for name, content in files.items():
-            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
-                raise ValueError(f"Nom de table invalide : {name}")
-            df = pd.read_csv(io.BytesIO(content) if isinstance(content, bytes) else content,
-                             sep=sep, engine="python" if sep is None else "c")
-            for col in ("order_date", "batch_date", "started_at", "finished_at", "loaded_at", "updated_at",
-                        "snapshot_date"):
-                if col in df.columns:
-                    df[col] = pd.to_datetime(df[col], errors="coerce")
+            if isinstance(content, Path):
+                content = content.read_bytes()
+            df, rep = read_csv(content, name if "." in name else name + ".csv", sep=sep)
+            table, n = rep.table, 2
+            while table in {r["table"] for r in reports}:
+                table, n = f"{rep.table}_{n}", n + 1
+            rep.table = table
             con.register("_df", df)
-            con.execute(f'CREATE TABLE "{name}" AS SELECT * FROM _df')
+            con.execute(f'CREATE TABLE "{table}" AS SELECT * FROM _df')
             con.unregister("_df")
+            reports.append(rep.to_dict())
     finally:
         con.close()
+    (db_path.parent / IMPORT_REPORT).write_text(json.dumps(reports, ensure_ascii=False, default=str, indent=1),
+                                                encoding="utf-8")
     return db_path
+
+
+def import_report(db_path: str | Path) -> list[dict] | None:
+    """Rapport d'import d'un espace de travail CSV (None pour une autre source)."""
+    import json
+
+    path = Path(db_path).parent / IMPORT_REPORT
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None

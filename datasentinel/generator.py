@@ -1,4 +1,4 @@
-"""Meridian Retail : jeu de données e-commerce synthétique et reproductible.
+"""Jeu de données e-commerce synthétique et reproductible.
 
 Cinq incidents connus peuvent être injectés ; chacun produit une entrée de
 « vérité de référence » (ground truth) qui sert à évaluer les diagnostics.
@@ -238,7 +238,7 @@ def load_ground_truth(db_path: Path) -> list[dict]:
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Génère le jeu Meridian Retail")
+    parser = argparse.ArgumentParser(description="Génère le jeu de données de test")
     parser.add_argument("--scenario", default="all", choices=SCENARIOS + ["every"])
     parser.add_argument("--out", default="var/labs")
     args = parser.parse_args()

@@ -1,5 +1,5 @@
 """Évaluation contre la vérité de référence : taux de détection, fausses alertes,
-justesse du diagnostic, temps d'enquête — pour chaque scénario du jeu Meridian Retail."""
+justesse du diagnostic, temps d'enquête — pour chaque scénario du jeu de données de test."""
 from __future__ import annotations
 
 import time

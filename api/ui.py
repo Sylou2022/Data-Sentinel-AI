@@ -20,12 +20,10 @@ from pydantic import BaseModel
 
 from datasentinel.connectors import snapshot_metadata
 from datasentinel.detection import CHECKS, daily_metrics, with_baseline
-from datasentinel.evaluation import evaluate
-from datasentinel.generator import SCENARIOS
 from datasentinel.llm import fmt_eur
 from datasentinel.models import CONFIRMED, STATUS_LABELS, records
 from datasentinel.service import DataSentinel
-from datasentinel.warehouse import Warehouse
+from datasentinel.warehouse import Warehouse, import_report
 
 from .deps import get_service
 
@@ -55,7 +53,7 @@ HYP_ORDER = {"supported": 0, "inconclusive": 1, "untestable": 2, "unlikely": 3, 
 HYP_BADGES = {"inconclusive": "Incertain", "untestable": "Non testée", "unlikely": "Peu probable", "refuted": "Réfutée"}
 _SQL_BREAKS = re.compile(r"\s+(FROM|WHERE|GROUP BY|ORDER BY|HAVING|LEFT JOIN|INNER JOIN|JOIN|UNION ALL|UNION|QUALIFY|LIMIT)\b")
 
-LAB_NAME = "Meridian Retail"
+LAB_NAME = "Jeu de données de test"
 # Enquêtes lancées en arrière-plan : run_id -> {"done", "error", "warning", "db_path"}
 _RUNS: dict[str, dict] = {}
 _RUNS_LOCK = threading.RLock()  # réentrant : default_source appelle launch_run sous verrou
@@ -117,7 +115,7 @@ def source_label(db_path: str | None, svc: DataSentinel | None = None) -> str:
     if meta:
         return f"Source active : SQL Server {meta['database']} · instantané du {_stamp(meta['extracted_at'])}"
     if "labs" in Path(db_path).parts:
-        return f"Source active : {LAB_NAME} (données synthétiques)"
+        return f"Source active : {LAB_NAME}"
     return "Source active : fichiers CSV importés"
 
 
@@ -215,7 +213,17 @@ def incidents(state: dict) -> list[dict]:
             "level": "observed" if not rc else ("confirmed" if status == CONFIRMED else "hypothesis"),
             "resolved": bool(plan) and plan.get("decision") == "approved",
         })
+    out += [quality_incident(a) for a in anomalies.values() if a["kind"].startswith("quality_")]
     return sorted(out, key=lambda i: (SEVERITY_ORDER.index(i["severity"]), i["period"][0]))
+
+
+def quality_incident(a: dict) -> dict:
+    d = a["details"]
+    col = ", ".join(a["columns"]) if d["rule"] != "Incohérence entre colonnes" else "plusieurs colonnes"
+    return {"id": f"q:{a['id']}", "rc": None, "plan": None, "anomalies": [a], "case_ids": [], "headline": a,
+            "title": f"{d['rule']} — {col}", "subtitle": f"{d['category']} · {d['status']} · {d['count']} ligne(s) sur {d['total_rows']}",
+            "table": a["table"], "severity": a["severity"], "period": ("", ""), "level": "observed", "resolved": False,
+            "quality": d}
 
 
 def run_label(state: dict | None, paused: bool, running: bool) -> str:
@@ -493,6 +501,54 @@ def report_view(state: dict, inc: dict, ann: dict) -> dict:
     }
 
 
+def quality_view(inc: dict, ann: dict) -> dict:
+    """Diagnostic complet d'un constat : faits, règle, justification, limites, recommandation, correction."""
+    d = inc["quality"]
+    corr = d.get("correction") or {}
+    dec = ann["quality"].get(inc["id"])
+    return {"category": d["category"], "status": d["status"], "confidence": d["confidence"], "rule": d["rule"],
+            "method": d["method"], "justification": d["justification"], "limits": d["limits"],
+            "recommendation": d["recommendation"], "count": d["count"], "total": d["total_rows"],
+            "ident_label": d["ident_label"], "rows": d["rows"], "chart": d.get("chart"),
+            "evidence": _evidence(inc["anomalies"][0]["evidence"]),
+            "correction": {"description": corr.get("description"), "consequences": corr.get("consequences"),
+                           "sql": (dec or {}).get("sql") or corr.get("sql") or ""} if corr else None,
+            "decision": dec["decision"] if dec else None}
+
+
+def quality_report(inc: dict, ann: dict) -> dict:
+    d, a = inc["quality"], inc["anomalies"][0]
+    corr = d.get("correction") or {}
+    dec = ann["quality"].get(inc["id"])
+    sql = (dec or {}).get("sql") or corr.get("sql") or ""
+    facts = [{"badge": ("Observée", "observed"),
+              "text": f"{d['ident_label']} {r['ident']}, colonne {r['column']} : valeur {r['value'] if r['value'] is not None else '(vide)'}"
+                      + (f" — valeur attendue : {r['expected']}" if r.get("expected") is not None else "") + "."}
+             for r in d["rows"][:6]]
+    if d["count"] > 6:
+        facts.append({"badge": ("Observée", "observed"), "text": f"… et {d['count'] - 6} autre(s) ligne(s) concernée(s)."})
+    facts.append({"badge": ("Confirmée", "confirmed") if d["status"] == "Erreur confirmée" else ("Hypothèse", "hypothesis"),
+                  "text": f"{d['status']} (confiance {d['confidence']}) : {d['justification']}"})
+    facts.append({"badge": ("Incertain", "neutral"), "text": f"Limite : {d['limits']}"})
+    state_ = "approved" if dec and dec["decision"] == "approve" else "rejected" if dec and dec["decision"] == "reject" else "open"
+    return {
+        "subtitle": f"{inc['title']} · table {inc['table']} · {d['status'].lower()}",
+        "summary": f"{d['rule']} : {d['count']} ligne(s) sur {d['total_rows']} de la table {inc['table']} "
+                   f"({d['category'].lower()}, {d['status'].lower()}). {d['justification']} Recommandation : {d['recommendation']}",
+        "narrative": None, "facts": facts, "proofs": [_evidence(a["evidence"])],
+        "plan": {"id": inc["id"], "title": d["rule"], "steps": [d["recommendation"]] + ([corr["description"]] if corr else []),
+                 "sql": sql, "risk": "faible", "state": state_, "executable": bool(sql),
+                 "rollback": "Le fichier d'origine n'est jamais modifié : la correction s'applique à une copie ou, "
+                             "après validation, par votre équipe dans le système source.",
+                 "not_executable_reason": "Aucune correction automatique : la valeur correcte ne peut pas être déduite "
+                                          "des données. Corrigez-la dans le système source."},
+        "verification": None, "before": a["summary"],
+        "decision": {"decision": dec["decision"], "by": dec["by"], "comment": dec.get("comment"),
+                     "time": f"{local(dec['ts']):%d/%m à %H:%M}"} if dec else None,
+        "can_decide": bool(sql) and state_ == "open" and not ann["paused"], "report_ready": True,
+    }
+
+
 # ---------------------------------------------------------------- lancement des enquêtes
 def launch_run(svc: DataSentinel, db: Path | None, checks: list[str] | None, actor: str,
                refresh_sql: bool = False) -> str:
@@ -636,16 +692,33 @@ def revenue_view(state: dict, incs: list[dict]) -> dict | None:
                f"{fmt_eur(expected)} attendus ({_signed(net)}).")
     if drops and net is not None and net >= 0:
         summary += " Sur l'ensemble de la période, les baisses sont masquées par des hausses anormales."
+    flagged = {a["period_start"][:10]: a["kind"] for a in det.get("anomalies", [])
+               if a["kind"] in ("revenue_drop", "revenue_spike")}
+    chart = daily[daily.index >= pd.Timestamp(start - timedelta(days=14))]
+    series = [{"day": d.strftime("%Y-%m-%d"), "observed": round(float(r["revenue"]), 2),
+               "expected": None if pd.isna(r["revenue_expected"]) else round(float(r["revenue_expected"]), 2),
+               "flag": {"revenue_drop": "drop", "revenue_spike": "spike"}.get(flagged.get(d.strftime("%Y-%m-%d")))}
+              for d, r in chart.iterrows()]
     return {"verdict": verdict, "title": f"Chiffre d'affaires : {title}", "summary": summary,
-            "drops": drops, "spikes": spikes,
+            "drops": drops, "spikes": spikes, "series": series, "window_start": start.isoformat(),
             "note": "Référence : médiane des 4 mêmes jours de semaine précédents. Une cause n'est « Confirmée » "
                     "qu'après une correction vérifiée sur une copie."}
 
 
 # ---------------------------------------------------------------- état complet pour l'interface
+def _recommendation(i: dict) -> str:
+    if i.get("quality"):
+        return i["quality"]["recommendation"]
+    if i["plan"] and i["plan"].get("title") and i["plan"]["title"] != "Investigation manuelle requise":
+        return i["plan"]["title"] + " (plan de correction à valider)."
+    return "Investigation manuelle requise : aucune cause n'est établie par les données."
+
+
 def _incident_brief(i: dict) -> dict:
+    q = i.get("quality")
     return {k: i[k] for k in ("id", "title", "subtitle", "table", "severity", "level", "resolved")} | \
-        {"severity_label": SEVERITIES[i["severity"]], "case_ids": i["case_ids"]}
+        {"severity_label": SEVERITIES[i["severity"]], "case_ids": i["case_ids"], "recommendation": _recommendation(i),
+         "status_label": q["status"] if q else None, "is_quality": bool(q)}
 
 
 def build_state(svc: DataSentinel, run_id: str | None, db_path: str | None, incident: str | None) -> dict:
@@ -668,6 +741,9 @@ def build_state(svc: DataSentinel, run_id: str | None, db_path: str | None, inci
     db_path = (state or {}).get("db_path") or info.get("db_path") or db_path
     ann = svc.annotations(run_id) if run_id else {"hypotheses": [], "dismissed": {}, "paused": False}
     incs = incidents(state) if state and not running else []
+    for i in incs:  # constat dont la correction est approuvée : résolu
+        if i.get("quality") and (ann["quality"].get(i["id"]) or {}).get("decision") == "approve":
+            i["resolved"] = True
     current = next((i for i in incs if i["id"] == incident), incs[0] if incs else None)
     run_ts = next((r["ts"] for r in runs if r["run_id"] == run_id), None)
     pending = [p for p in (state or {}).get("plans", []) if p.get("decision") not in ("approved", "rejected")] \
@@ -689,6 +765,14 @@ def build_state(svc: DataSentinel, run_id: str | None, db_path: str | None, inci
         when = "aujourd'hui" if run_ts and local(run_ts).date() == date.today() else \
             (f"le {local(run_ts):%d/%m}" if run_ts else "")
         detected = f"détectée {when} à {hhmm(run_ts)}" if run_ts else "détectée"
+        if current.get("quality"):
+            out["incident"] = _incident_brief(current) | {
+                "heading": f"Constat : {lc_first(current['title'])}",
+                "subtitle": f"Table {current['table']} · {detected} · {current['quality']['category'].lower()}",
+                "hypotheses": [], "fact": None, "impact": None, "quality": quality_view(current, ann),
+                "report": quality_report(current, ann),
+            }
+            return out
         out["incident"] = _incident_brief(current) | {
             "heading": f"Enquête : {lc_first(current['title'])}",
             "subtitle": f"Table {current['table']} · {detected} · {out['status']}",
@@ -727,16 +811,40 @@ def _alert(name: str, col: dict, prof: dict, type_label: str) -> str:
     return "Aucune"
 
 
+INFERRED_LABELS = {"entier": "Nombre entier", "décimal": "Nombre décimal", "pourcentage": "Pourcentage", "date": "Date",
+                   "booléen": "Booléen", "texte": "Texte", "vide": "Vide"}
+
+
+def _import_view(rep: dict) -> dict:
+    """Ce que l'import a déduit du fichier, et ce qu'il n'a pas pu trancher."""
+    col_warnings = [f"{c['name']} : {w}" for c in rep["columns"] for w in c["warnings"]]
+    return {"file": rep["file"], "encoding": rep["encoding"], "delimiter": rep["delimiter_label"],
+            "rows": rep["rows"], "bad_line_count": rep["bad_line_count"], "bad_lines": rep["bad_lines"][:10],
+            "duplicate_rows": rep["duplicate_rows"], "warnings": rep["warnings"] + col_warnings,
+            "preview_columns": list(rep["preview"][0]) if rep["preview"] else [c["name"] for c in rep["columns"]],
+            "preview": rep["preview"]}
+
+
 def profile_view(svc: DataSentinel, db_path: str) -> list[dict]:
+    reports = {r["table"]: r for r in import_report(db_path) or []}
     out = []
     for prof in svc.profile(db_path):
+        rep = reports.get(prof["table"])
+        inferred = {c["name"]: c for c in rep["columns"]} if rep else {}
         cols = []
         for c in prof["columns"]:
             t = _type_label(c["name"], c, prof["rows"])
-            cols.append({"name": c["name"], "type": t,
+            ic = inferred.get(c["name"])
+            if ic and t not in ("Identifiant", "Montant", "Catégorie"):
+                t = INFERRED_LABELS.get(ic["type"], t)
+            alert = _alert(c["name"], c, prof, t)
+            if ic and ic["nonconforming"]:
+                alert = "Valeurs non conformes"
+            cols.append({"name": c["name"], "type": t + (f" ({ic['detail']})" if ic and ic["detail"] and t != "Pourcentage" else ""),
                          "missing": f"{c['null_rate'] * 100:.1f} %".replace(".0 %", " %").replace(".", ","),
-                         "distinct": f"{c['distinct']:,}".replace(",", " "), "alert": _alert(c["name"], c, prof, t)})
-        out.append({"table": prof["table"], "rows": prof["rows"], "columns": cols})
+                         "distinct": f"{c['distinct']:,}".replace(",", " "), "alert": alert})
+        out.append({"table": prof["table"], "rows": prof["rows"], "columns": cols,
+                     "import": _import_view(rep) if rep else None})
     return out
 
 
@@ -765,18 +873,6 @@ def state(run_id: str | None = None, db_path: str | None = None, incident: str |
     return build_state(svc, run_id, db_path, incident)
 
 
-class LabRequest(BaseModel):
-    scenario: str = "all"
-
-
-@router.post("/sources/lab")
-def load_lab(req: LabRequest, svc: DataSentinel = Depends(get_service)):
-    if req.scenario not in SCENARIOS:
-        raise HTTPException(400, f"Scénario inconnu : {req.scenario}")
-    db = str(svc.create_lab(req.scenario))
-    return {"db_path": db, "source": source_label(db, svc)}
-
-
 @router.get("/source")
 def source(db_path: str, svc: DataSentinel = Depends(get_service)):
     db = str(_db(db_path, svc))
@@ -786,7 +882,7 @@ def source(db_path: str, svc: DataSentinel = Depends(get_service)):
 @router.post("/sources/upload")
 async def upload(files: list[UploadFile] = File(...), sep: str = Form("auto"), svc: DataSentinel = Depends(get_service)):
     separator = {"auto": None, "comma": ",", "semicolon": ";"}.get(sep)
-    content = {Path(f.filename or "table").stem: await f.read() for f in files}
+    content = {Path(f.filename or "table.csv").name: await f.read() for f in files}
     try:
         db = str(svc.import_csv(content, sep=separator))
     except Exception as exc:
@@ -802,7 +898,8 @@ def sqlserver_test(svc: DataSentinel = Depends(get_service)):
         raise HTTPException(502, f"Connexion impossible : {type(exc).__name__} — {exc}")
     
     if not info.get("ok", True):
-        return info
+        stage = {"network": "accès réseau", "authentication": "authentification"}.get(info.get("stage"), info.get("stage"))
+        raise HTTPException(502, f"Connexion impossible (étape : {stage}) — {info.get('error')}")
 
     return {
         k: info[k]
@@ -944,8 +1041,26 @@ class PlanTestRequest(Actor):
     sql: str | None = None
 
 
+@router.get("/runs/{run_id}/plans/changes")
+def plan_changes(run_id: str, plan_id: str, svc: DataSentinel = Depends(get_service)):
+    """Identifiants à corriger : valeur actuelle -> proposée, calculées sur une copie."""
+    _get(svc, run_id)
+    try:
+        return svc.plan_changes(run_id, plan_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+    except Exception as exc:
+        raise HTTPException(409, f"Calcul impossible sur la copie : {exc}")
+
+
 @router.post("/runs/{run_id}/plans/test")
 def plan_test(run_id: str, req: PlanTestRequest, svc: DataSentinel = Depends(get_service)):
+    if req.plan_id.startswith("q:"):
+        try:
+            sql = svc.finding_sql(run_id, req.plan_id) if req.sql is None else req.sql
+            return svc.test_finding_on_copy(run_id, req.plan_id, sql, req.actor)
+        except (ValueError, PermissionError) as exc:
+            raise HTTPException(400, str(exc))
     state = _get(svc, run_id)
     plan = next((p for p in state.get("plans", []) if p["id"] == req.plan_id), None)
     if not plan:
@@ -971,6 +1086,14 @@ def decide(run_id: str, req: DecisionRequest, svc: DataSentinel = Depends(get_se
         raise HTTPException(400, "Décision attendue : approve, reject ou modify.")
     if req.decision in ("approve", "reject") and not req.comment.strip():
         raise HTTPException(400, "Un commentaire de décision est obligatoire pour approuver ou refuser.")
+    if req.plan_id.startswith("q:"):
+        try:
+            if req.decision == "modify" and (req.sql or "").strip() == svc.finding_sql(run_id, req.plan_id).strip():
+                raise HTTPException(400, "Modifiez la requête de correction avant de soumettre le plan modifié.")
+            svc.decide_finding(run_id, req.plan_id, req.decision, req.actor, req.comment.strip() or None, req.sql)
+        except (ValueError, PermissionError) as exc:
+            raise HTTPException(400, str(exc))
+        return {"status": "recorded"}
     state = _get(svc, run_id)
     plan = next((p for p in state.get("plans", []) if p["id"] == req.plan_id), None)
     if not plan:
@@ -990,10 +1113,19 @@ def _events(svc: DataSentinel, run_id: str | None, queries: bool) -> list[dict]:
     return events if queries else [e for e in events if e["kind"] != "query"]
 
 
+def _audit_detail(payload: dict) -> str:
+    """Résumé lisible d'un événement : son résumé s'il existe, sinon « clé : valeur » (chemins omis)."""
+    if payload.get("summary"):
+        return str(payload["summary"])[:300]
+    parts = [f"{k.replace('_', ' ')} : {v if isinstance(v, (str, int, float)) else json.dumps(v, ensure_ascii=False, default=str)}"
+             for k, v in payload.items() if v not in (None, "", [], {}) and "path" not in k]
+    return (" · ".join(parts) or "—")[:300]
+
+
 @router.get("/audit")
 def audit(run_id: str | None = None, queries: bool = False, svc: DataSentinel = Depends(get_service)):
     return [{"time": f"{local(e['ts']):%d/%m/%Y %H:%M:%S}", "run_id": e["run_id"], "actor": e["actor"],
-             "kind": e["kind"], "detail": json.dumps(e["payload"], ensure_ascii=False, default=str)[:300]}
+             "kind": e["kind"], "detail": _audit_detail(e["payload"])}
             for e in reversed(_events(svc, run_id, queries))]
 
 
@@ -1024,19 +1156,11 @@ def settings(svc: DataSentinel = Depends(get_service)):
     sq = s.sqlserver
     return {"llm": f"Claude — {s.llm_model}" if s.llm_provider == "anthropic" else "gabarit local",
             "sqlserver": {"server": sq.server, "database": sq.database, "driver": sq.driver,
-                          "auth": "authentification Windows" if sq.trusted_connection else f"utilisateur {sq.user}"},
-            "scenarios": [{"id": k, "label": k} for k in SCENARIOS], "checks": CHECKS}
+                          "auth": sq.auth_label},
+            "checks": CHECKS}
 
 
 @router.post("/llm/check")
 def llm_check(svc: DataSentinel = Depends(get_service)):
     return svc.llm_check()
 
-
-@router.post("/evaluation")
-def run_evaluation():
-    ev = evaluate()
-    return {"metrics": ev["metrics"],
-            "rows": [{"scenario": r["scenario"], "incident": i["incident"], "detected": i["detected"],
-                      "diagnosed": i["diagnosed"], "status": i["status"]}
-                     for r in ev["scenarios"] for i in r["incidents"]]}

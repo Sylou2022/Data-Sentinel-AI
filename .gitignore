@@ -7,3 +7,5 @@ data/
 ~$*
 .env.*
 !.env.example
+# Clone du Space Hugging Face (dépôt séparé)
+Data-Sentinel-AI/

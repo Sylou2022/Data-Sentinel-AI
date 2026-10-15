@@ -115,3 +115,27 @@ def test_real_sqlserver_extraction(settings):
     with Warehouse(db) as wh:
         assert {"orders", "products", "customers", "regions"} <= set(wh.tables())
         assert int(wh.query("SELECT count(*) AS n FROM orders")["n"].iloc[0]) > 0
+
+
+def test_azure_auth_only_when_service_principal_is_configured():
+    cs = SqlServerSettings(server="x.database.windows.net", database="db", tenant_id="t", client_id="c",
+                           client_secret="SECRET123").connection_string()
+    assert "Trusted_Connection" not in cs and "UID" not in cs and "SECRET123" not in cs
+    cs = SqlServerSettings(server="srv", database="db", trusted_connection=False, user="lecteur").connection_string()
+    assert "UID=lecteur" in cs and "PWD" not in cs  # le mot de passe n'est ajouté qu'à la connexion
+
+
+def test_failed_connection_test_is_reported_as_failure(service, monkeypatch):
+    """Un test qui échoue ne doit jamais s'afficher « Connecté » dans l'interface."""
+    from fastapi.testclient import TestClient
+
+    import api.main as api_main
+
+    monkeypatch.setattr(type(service), "sqlserver_test",
+                        lambda self: {"ok": False, "stage": "network", "error": "serveur introuvable"})
+    api_main.app.dependency_overrides[api_main.get_service] = lambda: service
+    try:
+        r = TestClient(api_main.app).get("/ui/api/sources/sqlserver/test")
+    finally:
+        api_main.app.dependency_overrides.clear()
+    assert r.status_code == 502 and "accès réseau" in r.json()["detail"]

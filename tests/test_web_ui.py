@@ -27,8 +27,8 @@ def test_index_and_static_files_are_served(client):
     assert client.get("/static/app.js").status_code == 200
 
 
-def test_web_flow_lab_to_partial_validation(client):
-    db = client.post("/ui/api/sources/lab", json={"scenario": "all"}).json()["db_path"]
+def test_web_flow_lab_to_partial_validation(client, lab):
+    db = str(lab("all"))
     profile = client.get("/ui/api/profile", params={"db_path": db}).json()
     orders = next(t for t in profile if t["table"] == "orders")
     assert {c["name"]: c["type"] for c in orders["columns"]}["order_id"] == "Identifiant"
@@ -67,8 +67,8 @@ def test_web_flow_lab_to_partial_validation(client):
     assert "attachment" in client.get("/ui/api/audit/export", params={"run_id": run_id}).headers["content-disposition"]
 
 
-def test_selected_checks_limit_incidents(client):
-    db = client.post("/ui/api/sources/lab", json={"scenario": "all"}).json()["db_path"]
+def test_selected_checks_limit_incidents(client, lab):
+    db = str(lab("all"))
     run_id = client.post("/ui/api/runs", json={"db_path": db, "checks": ["categories"]}).json()["run_id"]
     state = _wait(client, run_id)
     assert [i["title"] for i in state["incidents"]] == ["Catégories manquantes"]
@@ -100,8 +100,8 @@ def test_without_source_overview_shows_linked_sql_database(client, service, tmp_
     assert rv["drops"][0]["causes"][0]["label"] in ("Hypothèse", "Observée")  # jamais « Confirmée » sans vérification
 
 
-def test_revenue_card_explains_drop_and_masking_spikes(client):
-    db = client.post("/ui/api/sources/lab", json={"scenario": "all"}).json()["db_path"]
+def test_revenue_card_explains_drop_and_masking_spikes(client, lab):
+    db = str(lab("all"))
     state = _wait(client, client.post("/ui/api/runs", json={"db_path": db}).json()["run_id"])
     rv = state["revenue"]
     assert rv["title"] == "Chiffre d'affaires : oui, il baisse anormalement"

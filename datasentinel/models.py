@@ -81,6 +81,7 @@ class Anomaly:
     severity: str
     summary: str
     evidence: Evidence
+    details: dict[str, Any] = field(default_factory=dict)  # constats génériques : règle, statut, recommandation…
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

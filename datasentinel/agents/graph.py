@@ -15,7 +15,7 @@ from langgraph.graph import END, START, StateGraph
 
 from ..audit import AuditLog
 from ..config import Settings
-from ..detection import check_of, make_context, run_detection
+from ..detection import is_quality, check_of, make_context, run_detection
 from ..impact import ImpactAnalyst
 from ..investigation import Investigator, aggregate_root_causes
 from ..llm import get_narrator
@@ -70,14 +70,16 @@ def build_graph(settings: Settings, audit: AuditLog, checkpointer: Any):
             det["anomalies"] = [a for a in det["anomalies"] if check_of(a["kind"]) in state["checks"]]
             det["checks"] = list(state["checks"])
         n = len(det["anomalies"])
+        nq = sum(is_quality(a) for a in det["anomalies"])
+        window = f" sur la fenêtre {det['window_start']} → {det['as_of']}" if det.get("as_of") else ""
         return _finish(state, wh, "Agent Détective",
-                       f"{n} anomalie(s) détectée(s) sur la fenêtre {det.get('window_start')} → {det.get('as_of')}.",
+                       f"{n} anomalie(s) détectée(s){window}, dont {nq} constat(s) de qualité des données.",
                        {"detection": det, "as_of": det.get("as_of")})
 
     def investigator(state: SentinelState) -> dict:
         wh, ctx = _open(state)
         inv = Investigator(wh, ctx)
-        cases = inv.investigate(state["detection"]["anomalies"])
+        cases = inv.investigate([a for a in state["detection"]["anomalies"] if not is_quality(a)])
         rcs, unexplained = aggregate_root_causes(cases)
         n_tests = sum(len(c["hypotheses"]) for c in cases)
         return _finish(state, wh, "Agent Enquêteur",
@@ -166,7 +168,7 @@ def build_graph(settings: Settings, audit: AuditLog, checkpointer: Any):
         return {"root_causes": rcs, "report": report}
 
     def after_detective(state: SentinelState) -> str:
-        return "investigator" if state["detection"]["anomalies"] else "reporter"
+        return "investigator" if any(not is_quality(a) for a in state["detection"]["anomalies"]) else "reporter"
 
     def after_verifier(state: SentinelState) -> str:
         return REVIEW_NODE if state.get("plans") else "reporter"

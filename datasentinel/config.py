@@ -33,7 +33,19 @@ class SqlServerSettings:
     trust_server_certificate: bool = field(default_factory=lambda: _env("SQLSERVER_TRUST_SERVER_CERTIFICATE", "no").lower() in ("yes", "true", "1"))
     mapping_file: str = field(default_factory=lambda: _env("SQLSERVER_MAPPING_FILE"))
 
+    @property
+    def azure(self) -> bool:
+        """Authentification Microsoft Entra (principal de service) dès que ses trois variables sont renseignées."""
+        return bool(self.tenant_id and self.client_id and self.client_secret)
+
+    @property
+    def auth_label(self) -> str:
+        if self.azure:
+            return "principal de service Microsoft Entra"
+        return "authentification Windows" if self.trusted_connection else f"utilisateur {self.user}"
+
     def connection_string(self) -> str:
+        """Sans les identifiants (mot de passe ou jeton), ajoutés au moment de la connexion."""
         parts = [
             f"DRIVER={{{self.driver}}}",
             f"SERVER={self.server}",
@@ -42,6 +54,8 @@ class SqlServerSettings:
             "Encrypt=yes",
             f"TrustServerCertificate={'yes' if self.trust_server_certificate else 'no'}",
         ]
+        if not self.azure:
+            parts.append("Trusted_Connection=yes" if self.trusted_connection else f"UID={self.user}")
         return ";".join(parts) + ";"
 
 

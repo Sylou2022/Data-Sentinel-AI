@@ -72,3 +72,20 @@ def test_claude_without_key_falls_back_to_template(monkeypatch):
           "impact": {"measurements": [], "dashboards": [], "decisions": [], "month_to_date": {"revenue_error_share": None}}}
     out = ClaudeNarrator("claude-opus-5-5").explain(rc)
     assert out["provider"] == "local-template" and out["guard"].startswith("llm_error")
+
+
+def test_plan_changes_list_ids_with_current_and_proposed_values(service, lab):
+    """Les identifiants à corriger viennent de la différence exacte copie corrigée / source ; la source reste intacte."""
+    from datasentinel.warehouse import Warehouse
+
+    db = lab("price_error")
+    state = service.start(db)
+    plan = next(p for p in state["plans"] if p["sql"].startswith("UPDATE"))
+    with Warehouse(db) as wh:
+        before = wh.query("SELECT max(price) AS m FROM products")["m"].iloc[0]
+    changes = {t["table"]: t for t in service.plan_changes(state["run_id"], plan["id"])}
+    prod = changes["products"]["changes"][0]
+    assert prod["action"] == "modifiée" and prod["key"].startswith("PRD-")
+    assert prod["changes"]["price"]["actuelle"] > prod["changes"]["price"]["proposée"]
+    with Warehouse(db) as wh:
+        assert wh.query("SELECT max(price) AS m FROM products")["m"].iloc[0] == before
