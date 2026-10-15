@@ -119,9 +119,8 @@ class SqlServerSource:
             "https://database.windows.net/.default"
         ).token
 
-        from azure.identity import ClientSecretCredential
+
         import base64
-        import json
 
         payload = token.split(".")[1]
         payload += "=" * (-len(payload) % 4)
