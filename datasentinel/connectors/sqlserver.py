@@ -142,17 +142,14 @@ class SqlServerSource:
             token_bytes,
         )
 
-       
-        
 
-
-
+        connection_string = self.settings.connection_string()
 
         con = pyodbc.connect(
-            self.settings.connection_string(),
+            connection_string,
             attrs_before={1256: token_struct},
-            autocommit=False,
             timeout=10,
+            autocommit=False,
         )
         con.timeout = 300
         return con
