@@ -109,9 +109,32 @@ class SqlServerSource:
             client_secret=self.settings.client_secret,
         )
 
+        # token = credential.get_token(
+        #     "https://database.windows.net/.default"
+        # ).token
+
+
+         # ajouter temporairement
         token = credential.get_token(
             "https://database.windows.net/.default"
         ).token
+
+        from azure.identity import ClientSecretCredential
+        import base64
+        import json
+
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+
+        print("TOKEN DIAGNOSTIC:", {
+            "tid": claims.get("tid"),
+            "appid": claims.get("appid"),
+            "azp": claims.get("azp"),
+            "aud": claims.get("aud"),
+            "oid": claims.get("oid"),
+        })
+
 
         token_bytes = token.encode("utf-16-le")
         token_struct = struct.pack(
@@ -119,6 +142,12 @@ class SqlServerSource:
             len(token_bytes),
             token_bytes,
         )
+
+       
+        
+
+
+
 
         con = pyodbc.connect(
             self.settings.connection_string(),
